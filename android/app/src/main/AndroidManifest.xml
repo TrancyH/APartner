@@ -74,6 +74,7 @@
                 <action android:name="com.amoolink.companion.ACTION_DUMP_PAIRING" />
                 <action android:name="com.amoolink.companion.ACTION_TEST_FS" />
                 <action android:name="com.amoolink.companion.ACTION_TEST_PUSH" />
+                <action android:name="com.amoolink.companion.ACTION_TEST_RELAY" />
                 <action android:name="com.amoolink.companion.ACTION_NET_TEST" />
                 <action android:name="com.amoolink.companion.ACTION_TLS_TEST" />
                 <action android:name="com.amoolink.companion.ACTION_TLS_TEST2" />

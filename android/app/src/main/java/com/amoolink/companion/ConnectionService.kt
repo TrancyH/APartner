@@ -352,6 +352,8 @@ class ConnectionService : Service() {
                 FsHandler.handle(this, conn, id, type, frame)
             // 反向推送响应(手机→桌面 fs_push_* 的 ready/ack/done,转交推送状态机)
             "fs_push_ready", "fs_push_ack", "fs_push_done" -> PushController.onResponse(frame)
+            // 桌面 RPC 响应(phones_page/relay_result)
+            "phones_page", "relay_result" -> DesktopRpc.onResponse(frame)
             else -> conn.send(ok(id, "error") { put("code", "unknown_type"); put("message", type) })
         }
         // 配对模式但收到非配对消息且未钉扎 → 断开
@@ -461,6 +463,9 @@ class ConnectionService : Service() {
     // ── 反向推送(文件管理器「分享到电脑」)────────────────────────
 
     fun hasConnectedDesktop(): Boolean = sessions.isNotEmpty()
+
+    /** 任一已连接桌面的连接(供 RPC:phones_list / fs_relay)。 */
+    fun firstDesktopConn(): FrameConn? = sessions.values.firstOrNull()
 
     /** 推送文件到指定桌面(fp 为 null 时取任一已连接);false = 无连接或已有推送在进行。 */
     fun pushToDesktop(desktopFp: String?, file: File, listener: PushController.Listener): Boolean {

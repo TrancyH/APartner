@@ -63,9 +63,13 @@ object FsHandler {
 
     // ── 路径安全 ────────────────────────────────────────────────────
 
-    /** 虚拟路径 → 真实 File。拒绝 ..;空/"/" → 根;结果必须落在 ROOT 内。 */
+    /** 路径 → 真实 File。拒绝 ..;空/"/" → 根;结果必须落在 ROOT 内。
+     *  兼容两种形态:虚拟路径("/Download/x")与手机本地物理绝对路径("/storage/emulated/0/Download/x",
+     *  文件管理器 Item.path / fs_relay 传入的即是),后者先剥 ROOT 前缀。 */
     private fun resolve(virtualPath: String): File? {
-        val raw = virtualPath.trim()
+        var raw = virtualPath.trim()
+        if (raw == ROOT) return File(ROOT)
+        if (raw.startsWith("$ROOT/")) raw = raw.removePrefix("$ROOT/")
         val abs = if (raw.startsWith("/")) raw else "/$raw"
         val parts = ArrayList<String>()
         for (seg in abs.split('/')) {
@@ -123,6 +127,10 @@ object FsHandler {
         val file = resolve(virtual) ?: return err(conn, id, "fs_path_denied", virtual)
         if (!hasAccess(context)) return err(conn, id, "fs_permission_required", "外部存储未授权")
         val exists = file.exists()
+        android.util.Log.i(
+            "AmooLink",
+            "FS-STAT virtual=$virtual resolved=${file.absolutePath} exists=$exists canRead=${file.canRead()} len=${if (exists) file.length() else -1}",
+        )
         conn.send(
             resp(id, "fs_info") {
                 put("path", virtual)

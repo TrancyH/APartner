@@ -26,6 +26,7 @@ class TestHookReceiver : BroadcastReceiver() {
         const val ACT_DUMP_PAIRING = "com.amoolink.companion.ACTION_DUMP_PAIRING"
         const val ACT_TEST_FS = "com.amoolink.companion.ACTION_TEST_FS"
         const val ACT_TEST_PUSH = "com.amoolink.companion.ACTION_TEST_PUSH"
+        const val ACT_TEST_RELAY = "com.amoolink.companion.ACTION_TEST_RELAY"
 
         /** 最近一次自研回复收到的内容(探针经通知回路读取,不依赖此静态量)。 */
         @Volatile
@@ -59,6 +60,8 @@ class TestHookReceiver : BroadcastReceiver() {
             ACT_TEST_FS -> testFs(context)
 
             ACT_TEST_PUSH -> testPush(context)
+
+            ACT_TEST_RELAY -> testRelay(context)
 
             "com.amoolink.companion.ACTION_TLS_TEST" -> {
                 val host = intent.getStringExtra("host") ?: "192.168.5.6"
@@ -213,6 +216,50 @@ class TestHookReceiver : BroadcastReceiver() {
             .addAction(action)
             .setAutoCancel(true)
             .build())
+    }
+
+    /**
+     * 手机↔手机中继自测:生成测试文件 → phones_list 选目标机 → fs_relay,
+     * logcat 打 `M5RELAY ok=… target=… sha=…`(桌面探针据此闭环验证)。
+     */
+    private fun testRelay(context: Context) {
+        val svc = ConnectionService.instance
+        val conn = svc?.firstDesktopConn()
+        if (conn == null) {
+            android.util.Log.i("AmooLink", "M5RELAY ok=false err=no_desktop")
+            return
+        }
+        Thread {
+            try {
+                val dir = java.io.File(
+                    android.os.Environment.getExternalStorageDirectory(),
+                    android.os.Environment.DIRECTORY_DOWNLOADS,
+                )
+                dir.mkdirs()
+                val file = java.io.File(dir, "apartner-relay-probe.bin")
+                val data = ByteArray(512 * 1024 + 13) { (it % 253).toByte() }
+                java.io.RandomAccessFile(file, "rw").use { raf ->
+                    raf.setLength(0)
+                    raf.seek(0)
+                    raf.write(data)
+                }
+                val phones = DesktopRpc.phonesList(conn)
+                if (phones.isEmpty()) {
+                    android.util.Log.i("AmooLink", "M5RELAY ok=false err=no_target")
+                    return@Thread
+                }
+                val target = phones.first()
+                val resp = DesktopRpc.relay(conn, target.id, listOf(file.absolutePath))
+                val md = java.security.MessageDigest.getInstance("SHA-256")
+                val sha = md.digest(data).joinToString("") { "%02x".format(it) }
+                android.util.Log.i(
+                    "AmooLink",
+                    "M5RELAY ok=${resp.optBoolean("ok", false)} target=${target.name} sha=$sha",
+                )
+            } catch (e: Exception) {
+                android.util.Log.i("AmooLink", "M5RELAY ok=false err=${e.message}")
+            }
+        }.start()
     }
 
     private fun echoClipboard(context: Context) {

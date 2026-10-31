@@ -511,7 +511,7 @@ class FilesPage(private val act: Activity) {
             )
         } else {
             box.addView(
-                Ui.text(act, "选择要发送到的电脑", 11, Ui.TEXT_3).apply { setPadding(dp(12), dp(4), dp(12), dp(4)) },
+                Ui.text(act, "发送到电脑", 11, Ui.TEXT_3).apply { setPadding(dp(12), dp(4), dp(12), dp(4)) },
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
             )
             for (fp in conns) {
@@ -535,6 +535,59 @@ class FilesPage(private val act: Activity) {
                 }
                 box.addView(row)
             }
+
+            // 手机分区:其他安装了 APartner 的手机,经桌面中继接收
+            val conn = svc.firstDesktopConn()
+            if (conn != null) {
+                box.addView(
+                    Ui.text(act, "发送到手机(APartner)", 11, Ui.TEXT_3)
+                        .apply { setPadding(dp(12), dp(10), dp(12), dp(4)) },
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+                )
+                val phoneSlot = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+                val loading = Ui.text(act, "正在获取附近手机…", 11, Ui.TEXT_3)
+                    .apply { setPadding(dp(12), dp(8), dp(12), dp(8)) }
+                phoneSlot.addView(loading)
+                box.addView(phoneSlot)
+                Thread {
+                    val phones = try {
+                        DesktopRpc.phonesList(conn)
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
+                    act.runOnUiThread {
+                        if (dlg?.isShowing != true) return@runOnUiThread
+                        phoneSlot.removeAllViews()
+                        if (phones.isEmpty()) {
+                            phoneSlot.addView(
+                                Ui.text(act, "附近没有其他安装了 APartner 的手机", 12, Ui.TEXT_3)
+                                    .apply { setPadding(dp(12), dp(8), dp(12), dp(8)) },
+                            )
+                            return@runOnUiThread
+                        }
+                        for (p in phones) {
+                            val prow = LinearLayout(act).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.CENTER_VERTICAL
+                                setPadding(dp(12), dp(12), dp(12), dp(12))
+                                background = Ui.ripple(act, Ui.card(act, Color.TRANSPARENT, 10, strokeWidth = 0))
+                            }
+                            prow.addView(Ui.text(act, "📱", 16, Ui.TEXT), LinearLayout.LayoutParams(dp(32), ViewGroupHelpers.wrap()))
+                            val pcol = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+                            pcol.addView(Ui.text(act, p.name, 14, Ui.TEXT, Ui.TITLE))
+                            pcol.addView(Ui.text(act, "在线 · 经电脑中继接收", 11, Ui.OK))
+                            prow.addView(pcol, LinearLayout.LayoutParams(0, ViewGroupHelpers.wrap(), 1f))
+                            prow.addView(Ui.text(act, "›", 14, Ui.TEXT_3))
+                            prow.setOnClickListener {
+                                dlg?.dismiss()
+                                exitSelection()
+                                startRelay(items, p)
+                            }
+                            phoneSlot.addView(prow)
+                        }
+                    }
+                }.start()
+            }
         }
         val scroll = android.widget.ScrollView(act)
         scroll.addView(box)
@@ -545,8 +598,31 @@ class FilesPage(private val act: Activity) {
             .show()
     }
 
-    /** 启动推送队列(指定目标桌面);含文件夹时打包 ZIP 临时文件。 */
-    private fun startPush(items: List<FileStore.Item>, fp: String?) {
+    /** 手机↔手机:请求桌面中继到目标手机(桌面 fs_read 源机 + fs_write 目标机)。 */
+    private fun startRelay(items: List<FileStore.Item>, target: DesktopRpc.PhoneTarget) {
+        val conn = ConnectionService.instance?.firstDesktopConn()
+        if (conn == null) {
+            toast("电脑连接已断开")
+            return
+        }
+        toast("正在经电脑中继 ${items.size} 项到 ${target.name}…")
+        Thread {
+            try {
+                val resp = DesktopRpc.relay(conn, target.id, items.map { it.path })
+                act.runOnUiThread {
+                    if (resp.optBoolean("ok", false)) {
+                        toast("电脑已受理:${items.size} 项 → ${target.name}(完成后电脑会通知)")
+                    } else {
+                        toast("中继被拒绝:${resp.optString("reason", "未知")}")
+                    }
+                }
+            } catch (e: Exception) {
+                act.runOnUiThread { toast("中继失败:${e.message}") }
+            }
+        }.start()
+    }
+
+    /** 启动推送队列(指定目标桌面);含文件夹时打包 ZIP 临时文件。 */    private fun startPush(items: List<FileStore.Item>, fp: String?) {
         if (pushing) {
             toast("已有推送在进行,请稍候")
             return
