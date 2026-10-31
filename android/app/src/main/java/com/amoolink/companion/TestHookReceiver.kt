@@ -24,6 +24,7 @@ class TestHookReceiver : BroadcastReceiver() {
         const val ACT_TEST_GET_CLIP = "com.amoolink.companion.ACTION_TEST_GET_CLIP"
         const val ACT_TEST_REPLY_RECV = "com.amoolink.companion.ACTION_TEST_REPLY_RECV"
         const val ACT_DUMP_PAIRING = "com.amoolink.companion.ACTION_DUMP_PAIRING"
+        const val ACT_TEST_FS = "com.amoolink.companion.ACTION_TEST_FS"
 
         /** 最近一次自研回复收到的内容(探针经通知回路读取,不依赖此静态量)。 */
         @Volatile
@@ -53,6 +54,8 @@ class TestHookReceiver : BroadcastReceiver() {
 
             ACT_DUMP_PAIRING -> ConnectionService.instance?.dumpPairingState()
                 ?: android.util.Log.i("AmooLink", "M5STATE pairing=false service=down")
+
+            ACT_TEST_FS -> testFs(context)
 
             "com.amoolink.companion.ACTION_TLS_TEST" -> {
                 val host = intent.getStringExtra("host") ?: "192.168.5.6"
@@ -212,6 +215,43 @@ class TestHookReceiver : BroadcastReceiver() {
     private fun echoClipboard(context: Context) {
         val clip = ConnectionService.instance?.readClipboard() ?: "(不可读)"
         postMarkerNotification(context, "AMOOCLIP:$clip")
+    }
+
+    /**
+     * fs_* 自测:在 Download/ 走一遍 写 → 读 → sha 比对 → 删,
+     * logcat 打 `M5FS fs ok=… sha=…`(探针据此断言存储授权与 IO 通路)。
+     */
+    private fun testFs(context: Context) {
+        Thread {
+            var file: java.io.File? = null
+            try {
+                val dir = java.io.File(
+                    android.os.Environment.getExternalStorageDirectory(),
+                    android.os.Environment.DIRECTORY_DOWNLOADS,
+                )
+                dir.mkdirs()
+                file = java.io.File(dir, "apartner-fs-probe.bin")
+                val data = ByteArray(64 * 1024) { (it % 251).toByte() }
+                java.io.RandomAccessFile(file, "rw").use { raf ->
+                    raf.setLength(0)
+                    raf.seek(0)
+                    raf.write(data)
+                }
+                val readBack = ByteArray(data.size)
+                java.io.RandomAccessFile(file, "r").use { raf ->
+                    raf.seek(0)
+                    raf.readFully(readBack)
+                }
+                val md = java.security.MessageDigest.getInstance("SHA-256")
+                val sha = md.digest(readBack).joinToString("") { "%02x".format(it) }
+                val ok = data.contentEquals(readBack)
+                android.util.Log.i("AmooLink", "M5FS fs ok=$ok sha=$sha path=${file.absolutePath}")
+            } catch (e: Exception) {
+                android.util.Log.i("AmooLink", "M5FS fs ok=false err=${e.javaClass.simpleName}:${e.message}")
+            } finally {
+                file?.delete()
+            }
+        }.start()
     }
 
     private fun postMarkerNotification(context: Context, text: String) {

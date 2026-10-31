@@ -18,7 +18,9 @@ object Proto {
     const val PORT = 47888
     const val MAX_FRAME = 1 shl 20
 
-    /** 手机端能力位图(docs/04 §5.3;投屏/文件等走 ADB 通道不在 APK v1 内)。 */
+    /** 手机端能力位图(docs/04 §5.3;FS_* 为 v2 新增,与桌面 packages/companion/fs-protocol.ts 对齐)。 */
+    const val CAP_FS_TREE = 1L shl 3
+    const val CAP_FS_PUSH_PULL = 1L shl 4
     const val CAP_CLIPBOARD_WRITE = 1L shl 5
     const val CAP_CLIPBOARD_READ_FOCUS = 1L shl 6
     const val CAP_NOTIF_READ = 1L shl 8
@@ -26,7 +28,7 @@ object Proto {
     const val CAP_SMS_READ = 1L shl 10
     const val CAP_CONTACTS_READ = 1L shl 12
     const val CAP_CALL_STATE = 1L shl 13
-    const val PHONE_CAPS = CAP_CLIPBOARD_WRITE or CAP_CLIPBOARD_READ_FOCUS or
+    const val PHONE_CAPS = CAP_FS_TREE or CAP_FS_PUSH_PULL or CAP_CLIPBOARD_WRITE or CAP_CLIPBOARD_READ_FOCUS or
         CAP_NOTIF_READ or CAP_NOTIF_REPLY or CAP_SMS_READ or CAP_CONTACTS_READ or CAP_CALL_STATE
 
     fun sha256(data: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(data)

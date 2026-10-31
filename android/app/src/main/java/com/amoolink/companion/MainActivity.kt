@@ -158,6 +158,9 @@ class MainActivity : Activity() {
         col.addView(guideRow("短信 / 通讯录 / 电话状态") {
             requestRuntimePerms()
         })
+        col.addView(guideRow(fsPermLabel()) {
+            openFsPermission()
+        })
         col.addView(guideRow("电池优化白名单(保活)") {
             try {
                 startActivity(
@@ -253,8 +256,46 @@ class MainActivity : Activity() {
             Manifest.permission.READ_CONTACTS,
             Manifest.permission.READ_PHONE_STATE,
         )
+        if (Build.VERSION.SDK_INT < 30) {
+            // API<30:经典存储读写并入运行时批量申请(API≥30 走「所有文件访问」专页)
+            perms.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            perms.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
         if (Build.VERSION.SDK_INT >= 33) perms.add(Manifest.permission.POST_NOTIFICATIONS)
         requestPermissions(perms.toTypedArray(), 1)
+    }
+
+    // ── 远程文件(fs_*)权限引导 ─────────────────────────────────────
+
+    private fun fsPermLabel(): String {
+        val granted = if (Build.VERSION.SDK_INT >= 30) {
+            android.os.Environment.isExternalStorageManager()
+        } else {
+            checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED &&
+                checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
+        return if (granted) "所有文件访问 ✓(远程文件已就绪)" else "所有文件访问(远程文件管理)"
+    }
+
+    private fun openFsPermission() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:$packageName"),
+                    ),
+                )
+            } catch (e: Exception) {
+                try {
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                } catch (e2: Exception) {
+                    toast("请到系统设置手动授予「所有文件访问」")
+                }
+            }
+        } else {
+            requestRuntimePerms()
+        }
     }
 
     private fun toast(msg: String) {

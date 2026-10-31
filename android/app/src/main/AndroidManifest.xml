@@ -17,6 +17,10 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 远程文件管理(fs_*):API≥30 走「所有文件访问」,更早走经典读写权限 -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
 
     <!-- 电话硬件非必需:短信/来电功能在无电话硬件设备(平板/ChromeOS)上自动降级,避免市场误判不兼容 -->
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
@@ -67,6 +71,7 @@
                 <action android:name="com.amoolink.companion.ACTION_TEST_GET_CLIP" />
                 <action android:name="com.amoolink.companion.ACTION_TEST_REPLY_RECV" />
                 <action android:name="com.amoolink.companion.ACTION_DUMP_PAIRING" />
+                <action android:name="com.amoolink.companion.ACTION_TEST_FS" />
                 <action android:name="com.amoolink.companion.ACTION_NET_TEST" />
                 <action android:name="com.amoolink.companion.ACTION_TLS_TEST" />
                 <action android:name="com.amoolink.companion.ACTION_TLS_TEST2" />

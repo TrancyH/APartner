@@ -346,6 +346,9 @@ class ConnectionService : Service() {
                 val items = ContactsReader.query(this, frame.optInt("max", 500))
                 conn.send(ok(id, "contacts_page") { put("items", items) })
             }
+            // 远程文件管理(协议 v2;FsHandler 异步处理并在 io 线程回帧)
+            "fs_list", "fs_stat", "fs_read", "fs_write", "fs_write_end", "fs_delete" ->
+                FsHandler.handle(this, conn, id, type, frame)
             else -> conn.send(ok(id, "error") { put("code", "unknown_type"); put("message", type) })
         }
         // 配对模式但收到非配对消息且未钉扎 → 断开
