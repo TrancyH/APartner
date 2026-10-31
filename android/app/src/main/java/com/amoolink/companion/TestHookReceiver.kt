@@ -242,7 +242,7 @@ class TestHookReceiver : BroadcastReceiver() {
             raf.seek(0)
             raf.write(data)
         }
-        val pushed = svc.pushToDesktop(file, object : PushController.Listener {
+        val pushed = svc.pushToDesktop(null, file, object : PushController.Listener {
             override fun onProgress(sent: Long, total: Long) {}
 
             override fun onDone() {

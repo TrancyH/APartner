@@ -462,9 +462,9 @@ class ConnectionService : Service() {
 
     fun hasConnectedDesktop(): Boolean = sessions.isNotEmpty()
 
-    /** 经任一已连接桌面推送文件;false = 无连接或已有推送在进行。 */
-    fun pushToDesktop(file: File, listener: PushController.Listener): Boolean {
-        val conn = sessions.values.firstOrNull() ?: return false
+    /** 推送文件到指定桌面(fp 为 null 时取任一已连接);false = 无连接或已有推送在进行。 */
+    fun pushToDesktop(desktopFp: String?, file: File, listener: PushController.Listener): Boolean {
+        val conn = (desktopFp?.let { sessions[it] } ?: sessions.values.firstOrNull()) ?: return false
         return PushController.push(conn, file, file.name, listener)
     }
 

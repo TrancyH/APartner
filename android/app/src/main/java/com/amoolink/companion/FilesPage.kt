@@ -3,14 +3,17 @@ package com.amoolink.companion
 import android.app.Activity
 import android.app.AlertDialog
 import android.graphics.Color
+import android.graphics.Outline
 import android.graphics.Typeface
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ListView
@@ -63,6 +66,7 @@ class FilesPage(private val act: Activity) {
     private var selectionMode = false
     private val pushQueue = ArrayDeque<File>()
     private var pushing = false
+    private var pushTarget: String? = null
 
     // v1.5:排序 / 剪贴板
     private var sortBy = FileStore.SortBy.TIME
@@ -434,9 +438,10 @@ class FilesPage(private val act: Activity) {
             refreshStorage()
             load()
             applyFilter()
-        } else {
-            showDetails(item)
+            return
         }
+        // 单击文件/分类页条目 → 弹出分享列表(选择发送到的电脑)
+        showShareDialog(listOf(item))
     }
 
     private fun onRowLongPress(item: FileStore.Item) {
@@ -484,20 +489,80 @@ class FilesPage(private val act: Activity) {
             toast("未连接电脑——请先在首页配对并连接")
             return
         }
-        if (pushing) return
-        val files = sel.filter { !it.dir }
-        val folders = sel.filter { it.dir }
+        exitSelection()
+        showShareDialog(sel)
+    }
+
+    /** 分享列表:列出已连接电脑,点击即发送(含文件夹时自动打包 ZIP)。 */
+    private fun showShareDialog(items: List<FileStore.Item>) {
+        val svc = ConnectionService.instance
+        val conns = svc?.connectedDesktops() ?: emptyList()
+        var dlg: AlertDialog? = null
+        val box = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+        }
+        if (conns.isEmpty() || svc == null) {
+            box.addView(
+                Ui.text(act, "没有已连接的电脑\n请在首页配对并连接后再分享", 13, Ui.TEXT_3).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(dp(16), dp(12), dp(16), dp(16))
+                },
+            )
+        } else {
+            box.addView(
+                Ui.text(act, "选择要发送到的电脑", 11, Ui.TEXT_3).apply { setPadding(dp(12), dp(4), dp(12), dp(4)) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            )
+            for (fp in conns) {
+                val row = LinearLayout(act).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                    background = Ui.ripple(act, Ui.card(act, Color.TRANSPARENT, 10, strokeWidth = 0))
+                }
+                row.addView(Ui.text(act, "💻", 16, Ui.TEXT), LinearLayout.LayoutParams(dp(32), ViewGroupHelpers.wrap()))
+                val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+                val desktopName: String = svc.pinnedName(fp)
+                col.addView(Ui.text(act, desktopName, 14, Ui.TEXT, Ui.TITLE))
+                col.addView(Ui.text(act, "在线 · 点击发送", 11, Ui.OK))
+                row.addView(col, LinearLayout.LayoutParams(0, ViewGroupHelpers.wrap(), 1f))
+                row.addView(Ui.text(act, "›", 14, Ui.TEXT_3))
+                row.setOnClickListener {
+                    dlg?.dismiss()
+                    exitSelection()
+                    startPush(items, fp)
+                }
+                box.addView(row)
+            }
+        }
+        val scroll = android.widget.ScrollView(act)
+        scroll.addView(box)
+        dlg = AlertDialog.Builder(act)
+            .setTitle(if (items.size == 1) "分享「${items[0].name}」" else "分享 ${items.size} 项")
+            .setView(scroll)
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 启动推送队列(指定目标桌面);含文件夹时打包 ZIP 临时文件。 */
+    private fun startPush(items: List<FileStore.Item>, fp: String?) {
+        if (pushing) {
+            toast("已有推送在进行,请稍候")
+            return
+        }
+        pushTarget = fp
+        val folders = items.filter { it.dir }
         if (folders.isEmpty()) {
             pushQueue.clear()
-            pushQueue.addAll(files.map { File(it.path) })
+            pushQueue.addAll(items.map { File(it.path) })
             pushing = true
             pushNext()
             return
         }
-        // 含文件夹 → 自动打包为一个 ZIP 临时文件再推送
         Thread {
             val tmp = File(act.cacheDir, "APartner-${System.currentTimeMillis()}.zip")
-            val ok = FileStore.zipOf(sel.map { File(it.path) }, tmp)
+            val ok = FileStore.zipOf(items.map { File(it.path) }, tmp)
             act.runOnUiThread {
                 if (!ok) {
                     toast("打包 ZIP 失败,已取消推送")
@@ -525,7 +590,7 @@ class FilesPage(private val act: Activity) {
         pushRow.visibility = View.VISIBLE
         pushBar.progress = 0
         pushText.text = "推送中:${next.name}"
-        val sent = ConnectionService.instance?.pushToDesktop(next, object : PushController.Listener {
+        val sent = ConnectionService.instance?.pushToDesktop(pushTarget, next, object : PushController.Listener {
             override fun onProgress(sentBytes: Long, total: Long) {
                 val pct = if (total <= 0) 100 else ((sentBytes * 100) / total).toInt()
                 act.runOnUiThread {
@@ -729,11 +794,32 @@ class FilesPage(private val act: Activity) {
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(dp(8), dp(8), dp(8), dp(8))
                 }
-                val tile = TextView(act).apply {
+                // 磁块:圆角裁剪容器,内含 缩略图(图片文件)或 类型 emoji(其他)
+                val tileWrap = FrameLayout(act).apply {
+                    clipToOutline = true
+                    outlineProvider = object : ViewOutlineProvider() {
+                        override fun getOutline(view: View, outline: Outline) {
+                            outline.setRoundRect(0, 0, view.width, view.height, dp(10).toFloat())
+                        }
+                    }
+                }
+                val tileImg = android.widget.ImageView(act).apply {
+                    scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+                    visibility = View.GONE
+                }
+                val tileText = TextView(act).apply {
                     gravity = Gravity.CENTER
                     textSize = 17f
                 }
-                line.addView(tile, LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(12) })
+                tileWrap.addView(
+                    tileImg,
+                    FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+                )
+                tileWrap.addView(
+                    tileText,
+                    FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+                )
+                line.addView(tileWrap, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) })
                 val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
                 val name = TextView(act).apply {
                     textSize = 15f
@@ -753,17 +839,41 @@ class FilesPage(private val act: Activity) {
                 check.background = Ui.card(act, Ui.SURFACE_HIGH, 999, Ui.STROKE, 1)
                 line.addView(check, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginStart = dp(8) })
                 view = line
-                holder = RowHolder(tile, name, meta, check, line)
+                holder = RowHolder(tileWrap, tileImg, tileText, name, meta, check, line)
                 view.tag = holder
             } else {
                 view = convertView
                 holder = view.tag as RowHolder
             }
             val item = filtered[position]
-            holder.tile.text = item.icon
-            holder.tile.background = Ui.tile(act, item.tileColor)
+            holder.boundPath = item.path
+            holder.tileWrap.background = Ui.tile(act, item.tileColor)
             holder.name.text = item.name
             holder.meta.text = "${item.sizeText} · ${item.timeText}"
+            // 图片文件 → 异步缩略图;其他 → 类型 emoji
+            val isImg = !item.dir && FileStore.isImage(item.name)
+            if (isImg) {
+                holder.tileText.visibility = View.GONE
+                holder.tileImg.visibility = View.VISIBLE
+                val cached = FileStore.thumbFromCache(item.path)
+                if (cached != null) {
+                    holder.tileImg.setImageBitmap(cached)
+                } else {
+                    holder.tileImg.setImageBitmap(null)
+                    FileStore.requestThumb(item.path, 128) { bmp ->
+                        act.runOnUiThread {
+                            // 行回收防串图:绑定路径仍是该行时才上屏
+                            if (holder.boundPath == item.path && bmp != null) {
+                                holder.tileImg.setImageBitmap(bmp)
+                            }
+                        }
+                    }
+                }
+            } else {
+                holder.tileImg.visibility = View.GONE
+                holder.tileText.visibility = View.VISIBLE
+                holder.tileText.text = item.icon
+            }
             val checked = item.path in selected
             holder.check.visibility = if (selectionMode) View.VISIBLE else View.GONE
             holder.check.text = if (checked) "✓" else ""
@@ -779,10 +889,14 @@ class FilesPage(private val act: Activity) {
     }
 
     private class RowHolder(
-        val tile: TextView,
+        val tileWrap: FrameLayout,
+        val tileImg: android.widget.ImageView,
+        val tileText: TextView,
         val name: TextView,
         val meta: TextView,
         val check: TextView,
         val row: LinearLayout,
-    )
+    ) {
+        var boundPath: String? = null
+    }
 }

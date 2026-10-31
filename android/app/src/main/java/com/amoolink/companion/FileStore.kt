@@ -1,6 +1,7 @@
 package com.amoolink.companion
 
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.provider.MediaStore
 import java.io.File
 import java.text.SimpleDateFormat
@@ -217,6 +218,55 @@ object FileStore {
         } catch (_: Exception) {
             false
         }
+    }
+
+    // ── 图片缩略图(LruCache + 单线程异步解码)────────────────────
+
+    private val thumbCache = object : android.util.LruCache<String, android.graphics.Bitmap>(8 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: android.graphics.Bitmap): Int = value.byteCount
+    }
+
+    private val thumbPending = java.util.concurrent.ConcurrentHashMap<String, MutableList<(android.graphics.Bitmap?) -> Unit>>()
+
+    private val thumbExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "amoolink-thumb").apply { isDaemon = true }
+    }
+
+    fun isImage(name: String): Boolean = extOf(name) in IMAGE_EXT
+
+    fun thumbFromCache(path: String): android.graphics.Bitmap? = thumbCache.get(path)
+
+    /**
+     * 异步取缩略图:命中缓存立即回调;否则入队解码(同路径去重),
+     * 回调在解码线程触发,调用方自行切 UI 线程。
+     */
+    fun requestThumb(path: String, reqPx: Int, cb: (android.graphics.Bitmap?) -> Unit) {
+        thumbCache.get(path)?.let { cb(it); return }
+        val cbs = synchronized(thumbPending) {
+            val list = thumbPending.getOrPut(path) { mutableListOf() }
+            list.add(cb)
+            list
+        }
+        if (cbs.size > 1) return // 已在解码,挂上回调即可
+        thumbExecutor.execute {
+            val bmp = try {
+                decodeScaled(path, reqPx)
+            } catch (_: Exception) {
+                null
+            }
+            if (bmp != null) thumbCache.put(path, bmp)
+            val waiting = thumbPending.remove(path) ?: mutableListOf()
+            for (c in waiting) c(bmp)
+        }
+    }
+
+    private fun decodeScaled(path: String, reqPx: Int): android.graphics.Bitmap? {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= reqPx && bounds.outHeight / (sample * 2) >= reqPx) sample *= 2
+        return BitmapFactory.decodeFile(path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
     }
 
     // ── 排序 ────────────────────────────────────────────────────────
