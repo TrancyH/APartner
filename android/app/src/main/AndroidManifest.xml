@@ -28,7 +28,7 @@
     <application
         android:label="APartner"
         android:icon="@android:drawable/stat_sys_phone_call"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:theme="@android:style/Theme.Material.NoActionBar"
         android:allowBackup="false"
         android:supportsRtl="true">
 

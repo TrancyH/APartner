@@ -2,28 +2,28 @@ package com.amoolink.companion
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.AbsListView
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import java.io.File
 
 /**
- * 内置文件管理器(程序化 UI,零外部依赖;对齐厂商文件管理的 v1 能力面):
- * 分类(最近/图片/视频/音频/文档/安装包/压缩包)+ 目录浏览(面包屑/新建文件夹/存储概览)
- * + 搜索过滤 + 多选批量(长按进入):分享到电脑(fs_push_* 反向推送)/ 删除,
- * 单选「更多」:重命名/详情。IO 全部后台线程,UI 更新 runOnUiThread。
+ * 内置文件管理器(暗夜链路设计系统):
+ * 顶栏(标题 + 存储占用条)+ 分类胶囊 + 磁块文件行 + 底部多选操作栏 + 推送进度条。
+ * 逻辑与 v1 完全一致(FileStore 数据层 / PushController 分享 / 多选批量)。
  */
 class FilesActivity : Activity() {
 
@@ -34,15 +34,18 @@ class FilesActivity : Activity() {
 
     private lateinit var titleText: TextView
     private lateinit var storageText: TextView
+    private lateinit var storageBar: ProgressBar
     private lateinit var tabsRow: LinearLayout
     private lateinit var searchEdit: EditText
-    private lateinit var selectBar: LinearLayout
     private lateinit var selectText: TextView
     private lateinit var shareBtn: Button
     private lateinit var deleteBtn: Button
     private lateinit var moreBtn: Button
     private lateinit var newFolderBtn: Button
-    private lateinit var pushRow: TextView
+    private lateinit var pushRow: LinearLayout
+    private lateinit var pushText: TextView
+    private lateinit var pushBar: ProgressBar
+    private lateinit var emptyText: TextView
     private lateinit var listView: ListView
     private lateinit var adapter: Adapter
     private val tabButtons = ArrayList<Button>()
@@ -56,105 +59,13 @@ class FilesActivity : Activity() {
     private val pushQueue = ArrayDeque<FileStore.Item>()
     private var pushing = false
 
-    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+    private fun dp(v: Int): Int = Ui.dp(this, v)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(20), dp(16), dp(12))
-        }
-
-        // 顶行:标题 + 新建文件夹(仅浏览模式)
-        val topLine = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        titleText = TextView(this).apply {
-            text = "最近"
-            textSize = 20f
-            typeface = Typeface.DEFAULT_BOLD
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.START
-        }
-        topLine.addView(titleText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        newFolderBtn = Button(this).apply { text = "+文件夹"; visibility = View.GONE }
-        newFolderBtn.setOnClickListener { onNewFolder() }
-        topLine.addView(newFolderBtn, params)
-        root.addView(topLine, params)
-
-        storageText = TextView(this).apply { textSize = 12f; setPadding(0, dp(2), 0, 0); visibility = View.GONE }
-        root.addView(storageText, params)
-
-        // 分类页签
-        val scroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
-        tabsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        for (t in TABS) {
-            val b = Button(this).apply {
-                text = t
-                textSize = 13f
-                setSingleLine()
-                setPadding(dp(10), 0, dp(10), 0)
-            }
-            b.setOnClickListener { switchTab(t) }
-            tabButtons.add(b)
-            tabsRow.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        }
-        scroll.addView(tabsRow)
-        root.addView(scroll, params)
-
-        // 搜索
-        searchEdit = EditText(this).apply {
-            hint = "搜索当前列表…"
-            textSize = 13f
-            setSingleLine()
-        }
-        searchEdit.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) = applyFilter()
-        })
-        root.addView(searchEdit, params)
-
-        // 多选操作栏
-        selectBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            visibility = View.GONE
-            setPadding(0, dp(6), 0, dp(6))
-        }
-        selectText = TextView(this).apply { textSize = 13f }
-        selectBar.addView(selectText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        shareBtn = Button(this).apply { textSize = 13f; text = "分享到电脑" }
-        deleteBtn = Button(this).apply { textSize = 13f; text = "删除" }
-        moreBtn = Button(this).apply { textSize = 13f; text = "更多"; isEnabled = false }
-        val cancelBtn = Button(this).apply { textSize = 13f; text = "取消" }
-        shareBtn.setOnClickListener { shareSelected() }
-        deleteBtn.setOnClickListener { deleteSelected() }
-        moreBtn.setOnClickListener { showMoreForSingle() }
-        cancelBtn.setOnClickListener { exitSelection() }
-        selectBar.addView(shareBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        selectBar.addView(deleteBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        selectBar.addView(moreBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        selectBar.addView(cancelBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        root.addView(selectBar, params)
-
-        // 推送进度行
-        pushRow = TextView(this).apply { textSize = 12f; visibility = View.GONE }
-        root.addView(pushRow, params)
-
-        // 列表
-        adapter = Adapter()
-        listView = ListView(this).apply { dividerHeight = 0 }
-        listView.adapter = adapter
-        listView.setOnItemLongClickListener { _, _, pos, _ ->
-            onRowLongPress(filtered[pos])
-            true
-        }
-        listView.setOnItemClickListener { _, _, pos, _ -> onRowClick(filtered[pos]) }
-        root.addView(listView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-
-        setContentView(root)
+        window.statusBarColor = Ui.BG
+        window.navigationBarColor = Ui.BG
+        buildUi()
         markTab("最近")
         load()
     }
@@ -168,12 +79,166 @@ class FilesActivity : Activity() {
         }
     }
 
+    // ── UI 构建 ─────────────────────────────────────────────────────
+
+    private fun buildUi() {
+        val match = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Ui.BG)
+            setPadding(dp(14), dp(16), dp(14), 0)
+        }
+
+        // 顶栏:标题 + 新建文件夹
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        titleText = Ui.text(this, "最近", 20, Ui.TEXT, Ui.TITLE)
+            .apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.START }
+        top.addView(titleText, LinearLayout.LayoutParams(0, ViewGroupHelpers.wrap(), 1f))
+        newFolderBtn = Ui.ghostButton(this, "+ 文件夹").apply { visibility = View.GONE }
+        newFolderBtn.setOnClickListener { onNewFolder() }
+        top.addView(newFolderBtn)
+        root.addView(top, match)
+
+        // 存储占用(浏览模式)
+        storageBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progressTintList = android.content.res.ColorStateList.valueOf(Ui.ACCENT)
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Ui.SURFACE_HIGH)
+            visibility = View.GONE
+        }
+        root.addView(storageBar, match.apply { topMargin = dp(8) })
+        storageText = Ui.text(this, "", 11, Ui.TEXT_3).apply { visibility = View.GONE }
+        root.addView(storageText, match)
+
+        // 分类胶囊
+        val scroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setBackgroundColor(Ui.BG)
+        }
+        tabsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        for (t in TABS) {
+            val b = Button(this).apply {
+                text = t
+                textSize = 13f
+                setSingleLine()
+                setAllCaps(false)
+                stateListAnimator = null
+                setPadding(dp(14), dp(4), dp(14), dp(4))
+                setTextColor(Ui.TEXT_2)
+                background = Ui.ripple(this@FilesActivity, Ui.card(this@FilesActivity, Ui.SURFACE, 999, Ui.STROKE, 1))
+            }
+            b.setOnClickListener { switchTab(t) }
+            tabButtons.add(b)
+            tabsRow.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                marginEnd = dp(8)
+            })
+        }
+        scroll.addView(tabsRow)
+        root.addView(scroll, match.apply { topMargin = dp(12) })
+
+        // 搜索
+        searchEdit = EditText(this).apply {
+            hint = "搜索当前列表…"
+            textSize = 13f
+            setSingleLine()
+            setTextColor(Ui.TEXT)
+            setHintTextColor(Ui.TEXT_3)
+            background = Ui.card(this@FilesActivity, Ui.SURFACE, 12)
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+        }
+        searchEdit.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) = applyFilter()
+        })
+        root.addView(searchEdit, match.apply { topMargin = dp(10) })
+
+        // 推送进度条
+        pushRow = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(0, dp(10), 0, 0)
+        }
+        pushText = Ui.text(this, "", 12, Ui.TEXT_2)
+        pushRow.addView(pushText, match)
+        pushBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progressTintList = android.content.res.ColorStateList.valueOf(Ui.ACCENT)
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Ui.SURFACE_HIGH)
+        }
+        pushRow.addView(pushBar, match)
+        root.addView(pushRow, match)
+
+        // 空态
+        emptyText = Ui.text(this, "", 13, Ui.TEXT_3).apply {
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            setPadding(0, dp(48), 0, 0)
+        }
+        root.addView(emptyText, match)
+
+        // 列表
+        adapter = Adapter()
+        listView = ListView(this).apply {
+            dividerHeight = 0
+            setBackgroundColor(Color.TRANSPARENT)
+            cacheColorHint = Color.TRANSPARENT
+        }
+        listView.adapter = adapter
+        listView.setOnItemLongClickListener { _, _, pos, _ ->
+            onRowLongPress(filtered[pos])
+            true
+        }
+        listView.setOnItemClickListener { _, _, pos, _ -> onRowClick(filtered[pos]) }
+        root.addView(listView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
+            topMargin = dp(6)
+        })
+
+        // 底部多选操作栏(固定底,多选时滑入)
+        val bottomWrap = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Ui.SURFACE_HIGH)
+            setPadding(dp(14), dp(10), dp(14), dp(14))
+            visibility = View.GONE
+        }
+        selectText = Ui.text(this, "已选 0", 12, Ui.TEXT_2, Ui.TITLE)
+        bottomWrap.addView(selectText, match)
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        shareBtn = Ui.primaryButton(this, "分享")
+        deleteBtn = Ui.ghostButton(this, "删除", danger = true)
+        moreBtn = Ui.ghostButton(this, "更多").apply { isEnabled = false }
+        val cancelBtn = Ui.ghostButton(this, "取消")
+        shareBtn.setOnClickListener { shareSelected() }
+        deleteBtn.setOnClickListener { deleteSelected() }
+        moreBtn.setOnClickListener { showMoreForSingle() }
+        cancelBtn.setOnClickListener { exitSelection() }
+        actions.addView(shareBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        actions.addView(deleteBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(6) })
+        actions.addView(moreBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(6) })
+        actions.addView(cancelBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(6) })
+        bottomWrap.addView(actions, match.apply { topMargin = dp(8) })
+
+        val screen = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Ui.BG) }
+        screen.addView(root, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        screen.addView(bottomWrap, match)
+
+        setContentView(screen)
+    }
+
     // ── 数据加载 ────────────────────────────────────────────────────
 
     private fun markTab(t: String) {
         tab = t
         for (b in tabButtons) {
-            b.setTypeface(null, if (b.text == t) Typeface.BOLD else Typeface.NORMAL)
+            val on = b.text == t
+            b.setTextColor(if (on) Color.parseColor("#0A2B29") else Ui.TEXT_2)
+            b.background = if (on) {
+                Ui.ripple(this, Ui.pill(this, Ui.ACCENT))
+            } else {
+                Ui.ripple(this, Ui.card(this, Ui.SURFACE, 999, Ui.STROKE, 1))
+            }
+            b.setTypeface(null, if (on) Typeface.BOLD else Typeface.NORMAL)
         }
     }
 
@@ -183,12 +248,26 @@ class FilesActivity : Activity() {
         markTab(t)
         val browse = t == "浏览"
         newFolderBtn.visibility = if (browse) View.VISIBLE else View.GONE
+        storageBar.visibility = if (browse) View.VISIBLE else View.GONE
         storageText.visibility = if (browse) View.VISIBLE else View.GONE
         if (browse) {
             browsePath = ROOT
-            storageText.text = FileStore.storageText()
+            refreshStorage()
         }
         load()
+    }
+
+    private fun refreshStorage() {
+        try {
+            val stat = android.os.StatFs(ROOT)
+            val total = stat.totalBytes
+            val free = stat.availableBytes
+            val used = total - free
+            storageBar.progress = if (total <= 0) 0 else ((used * 100) / total).toInt()
+            storageText.text = FileStore.storageText()
+        } catch (_: Exception) {
+            storageText.text = ""
+        }
     }
 
     private fun load() {
@@ -211,7 +290,7 @@ class FilesActivity : Activity() {
                 emptyList()
             }
             runOnUiThread {
-                if (t != tab || (t == "浏览" && path != browsePath)) return@runOnUiThread // 已切换,丢弃
+                if (t != tab || (t == "浏览" && path != browsePath)) return@runOnUiThread
                 items = list
                 applyFilter()
             }
@@ -225,12 +304,18 @@ class FilesActivity : Activity() {
             "浏览" -> "内部存储" + if (browsePath == ROOT) "" else browsePath.removePrefix(ROOT)
             else -> tab + (if (q.isEmpty()) "" else " · ${filtered.size} 项")
         }
+        val empty = filtered.isEmpty()
+        emptyText.text = when {
+            !empty -> ""
+            q.isNotEmpty() -> "没有匹配「$q」的文件"
+            tab == "浏览" -> "空目录"
+            else -> "这里还没有文件"
+        }
+        emptyText.visibility = if (empty) View.VISIBLE else View.GONE
         adapter.notifyDataSetChanged()
     }
 
     // ── 行交互 ──────────────────────────────────────────────────────
-
-    private fun rowPath(item: FileStore.Item): String = item.path
 
     private fun onRowClick(item: FileStore.Item) {
         if (selectionMode) {
@@ -239,6 +324,7 @@ class FilesActivity : Activity() {
         }
         if (item.dir && tab == "浏览") {
             browsePath = item.path
+            refreshStorage()
             load()
             applyFilter()
         } else {
@@ -250,39 +336,47 @@ class FilesActivity : Activity() {
         if (!selectionMode) {
             selectionMode = true
             selected.clear()
-            selectBar.visibility = View.VISIBLE
-            searchEdit.visibility = View.GONE
+            selectBarShow()
         }
         toggleSelect(item)
     }
 
+    private fun selectBarShow() {
+        // 底部操作栏固定在 screen 根的第 2 个子 View
+        findBottomBar()?.visibility = View.VISIBLE
+    }
+
+    private fun findBottomBar(): LinearLayout? {
+        val content = findViewById<ViewGroup>(android.R.id.content)
+        val screen = content.getChildAt(0) as? LinearLayout ?: return null
+        return screen.getChildAt(1) as? LinearLayout
+    }
+
     private fun toggleSelect(item: FileStore.Item) {
-        val p = rowPath(item)
+        val p = item.path
         if (!selected.add(p)) selected.remove(p)
         refreshSelectionBar()
     }
 
     private fun refreshSelectionBar() {
-        selectText.text = "已选 ${selected.size}"
-        shareBtn.text = "分享到电脑(${selected.size})"
+        selectText.text = "已选 ${selected.size} 项"
+        shareBtn.text = "分享(${selected.size})"
         deleteBtn.text = "删除(${selected.size})"
         moreBtn.isEnabled = selected.size == 1
+        adapter.notifyDataSetChanged()
     }
 
     private fun exitSelection() {
         selectionMode = false
         selected.clear()
-        selectBar.visibility = View.GONE
-        searchEdit.visibility = View.VISIBLE
+        findBottomBar()?.visibility = View.GONE
         refreshSelectionBar()
     }
-
-    private fun findItem(path: String): FileStore.Item? = items.firstOrNull { it.path == path }
 
     // ── 批量操作 ────────────────────────────────────────────────────
 
     private fun shareSelected() {
-        val files = selected.mapNotNull { findItem(it) }.filter { !it.dir }
+        val files = selected.mapNotNull { p -> items.firstOrNull { it.path == p } }.filter { !it.dir }
         if (files.isEmpty()) {
             toast("文件夹暂不支持推送,请选择文件")
             return
@@ -309,13 +403,15 @@ class FilesActivity : Activity() {
             return
         }
         pushRow.visibility = View.VISIBLE
-        pushRow.text = "推送中:${next.name} 0%"
+        pushBar.progress = 0
+        pushText.text = "推送中:${next.name}"
         val file = File(next.path)
         val sent = ConnectionService.instance?.pushToDesktop(file, object : PushController.Listener {
             override fun onProgress(sentBytes: Long, total: Long) {
-                val pct = if (total <= 0) 100 else (sentBytes * 100 / total).toInt()
+                val pct = if (total <= 0) 100 else ((sentBytes * 100) / total).toInt()
                 runOnUiThread {
-                    pushRow.text = "推送中:${next.name} $pct%(${next.sizeText})"
+                    pushBar.progress = pct
+                    pushText.text = "推送中:${next.name} $pct%(${next.sizeText})"
                 }
             }
 
@@ -362,7 +458,7 @@ class FilesActivity : Activity() {
 
     private fun showMoreForSingle() {
         if (selected.size != 1) return
-        val item = findItem(selected.first()) ?: return
+        val item = items.firstOrNull { it.path == selected.first() } ?: return
         val options = if (item.dir) arrayOf("重命名", "详情") else arrayOf("分享到电脑", "重命名", "详情")
         AlertDialog.Builder(this)
             .setTitle(item.name)
@@ -381,7 +477,14 @@ class FilesActivity : Activity() {
     }
 
     private fun showRename(item: FileStore.Item) {
-        val input = EditText(this).apply { setText(item.name); setSelection(item.name.length) }
+        val input = EditText(this).apply {
+            setText(item.name)
+            setSelection(item.name.length)
+            setTextColor(Ui.TEXT)
+            setHintTextColor(Ui.TEXT_3)
+            background = Ui.card(this@FilesActivity, Ui.SURFACE_HIGH, 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
         AlertDialog.Builder(this)
             .setTitle("重命名")
             .setView(input)
@@ -422,12 +525,19 @@ class FilesActivity : Activity() {
 
     private fun navigateUp() {
         browsePath = File(browsePath).parent ?: ROOT
+        refreshStorage()
         load()
         applyFilter()
     }
 
     private fun onNewFolder() {
-        val input = EditText(this).apply { hint = "文件夹名称" }
+        val input = EditText(this).apply {
+            hint = "文件夹名称"
+            setTextColor(Ui.TEXT)
+            setHintTextColor(Ui.TEXT_3)
+            background = Ui.card(this@FilesActivity, Ui.SURFACE_HIGH, 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
         AlertDialog.Builder(this)
             .setTitle("新建文件夹")
             .setView(input)
@@ -450,7 +560,7 @@ class FilesActivity : Activity() {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     }
 
-    // ── 列表适配器 ──────────────────────────────────────────────────
+    // ── 列表适配器(磁块行)────────────────────────────────────────
 
     inner class Adapter : BaseAdapter() {
         override fun getCount(): Int = filtered.size
@@ -464,45 +574,62 @@ class FilesActivity : Activity() {
                 val line = LinearLayout(this@FilesActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(6), dp(10), dp(6), dp(10))
+                    setPadding(dp(8), dp(8), dp(8), dp(8))
                 }
-                val icon = TextView(this@FilesActivity).apply { textSize = 22f }
+                val tile = TextView(this@FilesActivity).apply {
+                    gravity = Gravity.CENTER
+                    textSize = 17f
+                }
+                line.addView(tile, LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(12) })
                 val col = LinearLayout(this@FilesActivity).apply { orientation = LinearLayout.VERTICAL }
                 val name = TextView(this@FilesActivity).apply {
                     textSize = 15f
+                    setTextColor(Ui.TEXT)
                     maxLines = 1
                     ellipsize = android.text.TextUtils.TruncateAt.START
                 }
-                val meta = TextView(this@FilesActivity).apply { textSize = 11f; alpha = 0.6f }
+                val meta = TextView(this@FilesActivity).apply { textSize = 11f; setTextColor(Ui.TEXT_3) }
                 col.addView(name, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                 col.addView(meta, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-                line.addView(icon, LinearLayout.LayoutParams(dp(34), ViewGroup.LayoutParams.WRAP_CONTENT))
                 line.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                val check = TextView(this@FilesActivity).apply { textSize = 18f; visibility = View.GONE }
-                line.addView(check, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                val check = TextView(this@FilesActivity).apply {
+                    textSize = 15f
+                    gravity = Gravity.CENTER
+                    visibility = View.GONE
+                }
+                check.background = Ui.card(this@FilesActivity, Ui.SURFACE_HIGH, 999, Ui.STROKE, 1)
+                line.addView(check, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginStart = dp(8) })
                 view = line
-                holder = RowHolder(icon, name, meta, check)
+                holder = RowHolder(tile, name, meta, check, line)
                 view.tag = holder
             } else {
                 view = convertView
                 holder = view.tag as RowHolder
             }
             val item = filtered[position]
-            holder.icon.text = item.icon
+            holder.tile.text = item.icon
+            holder.tile.background = Ui.tile(this@FilesActivity, item.tileColor)
             holder.name.text = item.name
             holder.meta.text = "${item.sizeText} · ${item.timeText}"
-            val checked = rowPath(item) in selected
+            val checked = item.path in selected
             holder.check.visibility = if (selectionMode) View.VISIBLE else View.GONE
-            holder.check.text = if (checked) "✅" else "⚪"
-            view.setBackgroundColor(if (checked) 0x333B82F6.toInt() else 0x00000000)
+            holder.check.text = if (checked) "✓" else ""
+            holder.check.background = if (checked) {
+                Ui.card(this@FilesActivity, Ui.ACCENT, 999, strokeWidth = 0)
+            } else {
+                Ui.card(this@FilesActivity, Ui.SURFACE_HIGH, 999, Ui.STROKE, 1)
+            }
+            holder.check.setTextColor(Color.parseColor("#0A2B29"))
+            holder.row.setBackgroundColor(if (checked) Color.parseColor("#182031") else Color.TRANSPARENT)
             return view
         }
     }
 
     private class RowHolder(
-        val icon: TextView,
+        val tile: TextView,
         val name: TextView,
         val meta: TextView,
         val check: TextView,
+        val row: LinearLayout,
     )
 }

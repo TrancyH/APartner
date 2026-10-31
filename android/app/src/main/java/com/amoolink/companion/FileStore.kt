@@ -33,6 +33,19 @@ object FileStore {
                 else -> "📄"
             }
 
+        /** 磁块底色(暗夜链路:按类型着色,OEM 文件管理风格)。 */
+        val tileColor: Int
+            get() = when {
+                dir -> Ui.TILE_OTHER
+                extOf(name) in IMAGE_EXT -> Ui.TILE_IMAGE
+                extOf(name) in VIDEO_EXT -> Ui.TILE_VIDEO
+                extOf(name) in AUDIO_EXT -> Ui.TILE_AUDIO
+                extOf(name) == "apk" -> Ui.TILE_APK
+                extOf(name) in ARCHIVE_EXT -> Ui.TILE_ARCHIVE
+                extOf(name) in DOC_EXT -> Ui.TILE_DOC
+                else -> Ui.TILE_OTHER
+            }
+
         val sizeText: String
             get() = when {
                 dir -> "目录"
