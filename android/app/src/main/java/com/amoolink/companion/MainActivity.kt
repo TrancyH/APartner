@@ -18,6 +18,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.CompoundButton
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
@@ -25,10 +26,10 @@ import android.widget.TextView
 import android.widget.Toast
 
 /**
- * 伴侣 APK 主界面(暗夜链路设计系统):
- * Hero 连接可视化卡(手机↔电脑链路动效,唯一记忆点)→ 配对(OTP 大字 + SAS 比对)
- * → 文件入口 → 权限列表 → 已配对电脑 → 常规设置。
- * 逻辑与 v1 完全一致(Pairing.begin/confirm/cancel、renderStatus 数据源、forget、自启)。
+ * 伴侣 APK 主壳(暗夜链路设计系统):底部 dock 切换 首页 / 文件管理 两页,
+ * 页面常驻 FrameLayout(切换不丢列表状态)。
+ * 首页 = Hero 连接可视化卡(手机↔电脑链路动效,唯一记忆点)+ 配对(OTP+SAS)
+ * + 权限列表 + 已配对电脑;文件页 = FilesPage。逻辑与 v1 一致。
  */
 class MainActivity : Activity() {
 
@@ -47,6 +48,14 @@ class MainActivity : Activity() {
     private lateinit var permRights: MutableMap<String, TextView>
     private lateinit var pairedList: LinearLayout
     private lateinit var pairedEmpty: TextView
+
+    // 壳:dock + 双页
+    private lateinit var homeRoot: View
+    private lateinit var filesRoot: View
+    private lateinit var dockHome: LinearLayout
+    private lateinit var dockFiles: LinearLayout
+    private lateinit var filesPage: FilesPage
+    private var currentTab = "home"
 
     private var renderedPaired: Set<String> = emptySet()
 
@@ -68,9 +77,64 @@ class MainActivity : Activity() {
         startServiceExplicit()
     }
 
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (currentTab == "files") {
+            if (filesPage.onBackPressed()) return
+            switchTab("home")
+            return
+        }
+        super.onBackPressed()
+    }
+
+    private fun switchTab(t: String) {
+        if (currentTab == t) return
+        currentTab = t
+        homeRoot.visibility = if (t == "home") View.VISIBLE else View.GONE
+        filesRoot.visibility = if (t == "files") View.VISIBLE else View.GONE
+        markDock(t)
+        if (t == "files") filesPage.onResume()
+    }
+
+    private fun markDock(t: String) {
+        setDockState(dockHome, t == "home")
+        setDockState(dockFiles, t == "files")
+    }
+
+    private fun setDockState(col: LinearLayout, on: Boolean) {
+        (col.getChildAt(0) as TextView).setTextColor(if (on) Ui.ACCENT else Ui.TEXT_3)
+        (col.getChildAt(1) as TextView).setTextColor(if (on) Ui.ACCENT else Ui.TEXT_3)
+    }
+
+    private fun buildDock(): LinearLayout {
+        val dock = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Ui.SURFACE_HIGH)
+            setPadding(dp(8), dp(8), dp(8), dp(10))
+        }
+        dockHome = dockItem("⌂", "首页")
+        dockFiles = dockItem("☰", "文件管理")
+        dockHome.setOnClickListener { switchTab("home") }
+        dockFiles.setOnClickListener { switchTab("files") }
+        dock.addView(dockHome, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        dock.addView(dockFiles, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        markDock("home")
+        return dock
+    }
+
+    private fun dockItem(glyph: String, label: String): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = Ui.ripple(this@MainActivity, Ui.card(this@MainActivity, Color.TRANSPARENT, 10, strokeWidth = 0))
+            addView(Ui.text(this@MainActivity, glyph, 19, Ui.TEXT_3))
+            addView(Ui.text(this@MainActivity, label, 10, Ui.TEXT_3))
+        }
+
     override fun onResume() {
         super.onResume()
         handler.post(refresh)
+        if (currentTab == "files") filesPage.onResume()
         // 焦点在手:推送当前剪贴板到已连接桌面(M5-6 手机→电脑方向)
         val clip = ConnectionService.instance?.readClipboard()
         if (!clip.isNullOrEmpty()) {
@@ -196,20 +260,6 @@ class MainActivity : Activity() {
         }
         col.addView(pairBtn, marginTop(12))
 
-        // 文件
-        col.addView(Ui.sectionHeader(this, "文件"), marginTop(22))
-        val filesCard = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = Ui.ripple(this@MainActivity, Ui.card(this@MainActivity, Ui.SURFACE, 14))
-            setOnClickListener { startActivity(Intent(this@MainActivity, FilesActivity::class.java)) }
-            setPadding(dp(4), 0, dp(4), 0)
-        }
-        val (filesRow, _) = Ui.settingRow(this, "🗂", "文件管理", "浏览 · 分类 · 分享到电脑 › ") {
-            startActivity(Intent(this, FilesActivity::class.java))
-        }
-        filesCard.addView(filesRow)
-        col.addView(filesCard, marginTop(8))
-
         // 权限
         col.addView(Ui.sectionHeader(this, "权限"), marginTop(22))
         permRights = mutableMapOf()
@@ -281,7 +331,21 @@ class MainActivity : Activity() {
         generalCard.addView(restartRow)
         col.addView(generalCard, marginTop(8))
 
-        setContentView(root)
+        // 壳:FrameLayout 双页 + 底部 dock
+        homeRoot = root
+        filesPage = FilesPage(this)
+        filesRoot = filesPage.build()
+        filesRoot.visibility = View.GONE
+
+        val container = FrameLayout(this).apply { setBackgroundColor(Ui.BG) }
+        container.addView(homeRoot, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        container.addView(filesRoot, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        val screen = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Ui.BG) }
+        screen.addView(container, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        screen.addView(buildDock(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        setContentView(screen)
     }
 
     private fun dividerLine(): View =

@@ -4,7 +4,6 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.graphics.Color
 import android.graphics.Typeface
-import android.os.Bundle
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
@@ -21,18 +20,24 @@ import android.widget.Toast
 import java.io.File
 
 /**
- * 内置文件管理器(暗夜链路设计系统):
- * 顶栏(标题 + 存储占用条)+ 分类胶囊 + 磁块文件行 + 底部多选操作栏 + 推送进度条。
- * 逻辑与 v1 完全一致(FileStore 数据层 / PushController 分享 / 多选批量)。
+ * 文件管理页(由 FilesActivity 重构为页面类,供底部 dock 壳容器承载):
+ * 分类胶囊 + 磁块文件行 + 搜索 + 存储条 + 底部多选操作栏;
+ * v1.5 能力:排序(名称/时间/大小 × 升降)、复制/剪切/粘贴、压缩为 ZIP、解压到此处
+ * (Zip Slip 防护)、文件夹分享自动打包 ZIP 推送。零外部依赖(zip 用 java.util.zip)。
  */
-class FilesActivity : Activity() {
+class FilesPage(private val act: Activity) {
 
     companion object {
         private const val ROOT = FileStore.ROOT
         private val TABS = listOf("最近", "图片", "视频", "音频", "文档", "安装包", "压缩包", "浏览")
     }
 
+    private fun dp(v: Int): Int = Ui.dp(act, v)
+
     private lateinit var titleText: TextView
+    private lateinit var sortBtn: Button
+    private lateinit var pasteBtn: Button
+    private lateinit var newFolderBtn: Button
     private lateinit var storageText: TextView
     private lateinit var storageBar: ProgressBar
     private lateinit var tabsRow: LinearLayout
@@ -41,11 +46,11 @@ class FilesActivity : Activity() {
     private lateinit var shareBtn: Button
     private lateinit var deleteBtn: Button
     private lateinit var moreBtn: Button
-    private lateinit var newFolderBtn: Button
     private lateinit var pushRow: LinearLayout
     private lateinit var pushText: TextView
     private lateinit var pushBar: ProgressBar
     private lateinit var emptyText: TextView
+    private lateinit var bottomBar: LinearLayout
     private lateinit var listView: ListView
     private lateinit var adapter: Adapter
     private val tabButtons = ArrayList<Button>()
@@ -56,69 +61,64 @@ class FilesActivity : Activity() {
     private var filtered: List<FileStore.Item> = emptyList()
     private val selected = LinkedHashSet<String>()
     private var selectionMode = false
-    private val pushQueue = ArrayDeque<FileStore.Item>()
+    private val pushQueue = ArrayDeque<File>()
     private var pushing = false
 
-    private fun dp(v: Int): Int = Ui.dp(this, v)
+    // v1.5:排序 / 剪贴板
+    private var sortBy = FileStore.SortBy.TIME
+    private var sortAsc = false
+    private enum class ClipMode { COPY, CUT }
+    private var clipMode: ClipMode? = null
+    private var clipPaths: List<String> = emptyList()
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        window.statusBarColor = Ui.BG
-        window.navigationBarColor = Ui.BG
-        buildUi()
-        markTab("最近")
-        load()
-    }
+    // ── 页面构建 ────────────────────────────────────────────────────
 
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        when {
-            selectionMode -> exitSelection()
-            tab == "浏览" && browsePath != ROOT -> navigateUp()
-            else -> super.onBackPressed()
-        }
-    }
-
-    // ── UI 构建 ─────────────────────────────────────────────────────
-
-    private fun buildUi() {
+    fun build(): View {
         val match = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
 
-        val root = LinearLayout(this).apply {
+        val root = LinearLayout(act).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Ui.BG)
             setPadding(dp(14), dp(16), dp(14), 0)
         }
 
-        // 顶栏:标题 + 新建文件夹
-        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        titleText = Ui.text(this, "最近", 20, Ui.TEXT, Ui.TITLE)
+        // 顶栏:标题 + 排序 / 粘贴 / 新建文件夹
+        val top = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        titleText = Ui.text(act, "最近", 20, Ui.TEXT, Ui.TITLE)
             .apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.START }
         top.addView(titleText, LinearLayout.LayoutParams(0, ViewGroupHelpers.wrap(), 1f))
-        newFolderBtn = Ui.ghostButton(this, "+ 文件夹").apply { visibility = View.GONE }
+        pasteBtn = Ui.ghostButton(act, "粘贴").apply { visibility = View.GONE }
+        pasteBtn.setOnClickListener { pasteClipboard() }
+        top.addView(pasteBtn)
+        sortBtn = Ui.ghostButton(act, "排序").apply {
+            setOnClickListener { showSortMenu() }
+            (top as LinearLayout).let { }
+        }
+        top.addView(sortBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(6) })
+        newFolderBtn = Ui.ghostButton(act, "+ 文件夹").apply { visibility = View.GONE }
         newFolderBtn.setOnClickListener { onNewFolder() }
-        top.addView(newFolderBtn)
+        top.addView(newFolderBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(6) })
         root.addView(top, match)
 
         // 存储占用(浏览模式)
-        storageBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+        storageBar = ProgressBar(act, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
             progressTintList = android.content.res.ColorStateList.valueOf(Ui.ACCENT)
             progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Ui.SURFACE_HIGH)
             visibility = View.GONE
         }
         root.addView(storageBar, match.apply { topMargin = dp(8) })
-        storageText = Ui.text(this, "", 11, Ui.TEXT_3).apply { visibility = View.GONE }
+        storageText = Ui.text(act, "", 11, Ui.TEXT_3).apply { visibility = View.GONE }
         root.addView(storageText, match)
 
         // 分类胶囊
-        val scroll = HorizontalScrollView(this).apply {
+        val scroll = HorizontalScrollView(act).apply {
             isHorizontalScrollBarEnabled = false
             setBackgroundColor(Ui.BG)
         }
-        tabsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        tabsRow = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
         for (t in TABS) {
-            val b = Button(this).apply {
+            val b = Button(act).apply {
                 text = t
                 textSize = 13f
                 setSingleLine()
@@ -126,7 +126,7 @@ class FilesActivity : Activity() {
                 stateListAnimator = null
                 setPadding(dp(14), dp(4), dp(14), dp(4))
                 setTextColor(Ui.TEXT_2)
-                background = Ui.ripple(this@FilesActivity, Ui.card(this@FilesActivity, Ui.SURFACE, 999, Ui.STROKE, 1))
+                background = Ui.ripple(act, Ui.card(act, Ui.SURFACE, 999, Ui.STROKE, 1))
             }
             b.setOnClickListener { switchTab(t) }
             tabButtons.add(b)
@@ -138,13 +138,13 @@ class FilesActivity : Activity() {
         root.addView(scroll, match.apply { topMargin = dp(12) })
 
         // 搜索
-        searchEdit = EditText(this).apply {
+        searchEdit = EditText(act).apply {
             hint = "搜索当前列表…"
             textSize = 13f
             setSingleLine()
             setTextColor(Ui.TEXT)
             setHintTextColor(Ui.TEXT_3)
-            background = Ui.card(this@FilesActivity, Ui.SURFACE, 12)
+            background = Ui.card(act, Ui.SURFACE, 12)
             setPadding(dp(12), dp(9), dp(12), dp(9))
         }
         searchEdit.addTextChangedListener(object : TextWatcher {
@@ -155,14 +155,14 @@ class FilesActivity : Activity() {
         root.addView(searchEdit, match.apply { topMargin = dp(10) })
 
         // 推送进度条
-        pushRow = LinearLayout(this).apply {
+        pushRow = LinearLayout(act).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
             setPadding(0, dp(10), 0, 0)
         }
-        pushText = Ui.text(this, "", 12, Ui.TEXT_2)
+        pushText = Ui.text(act, "", 12, Ui.TEXT_2)
         pushRow.addView(pushText, match)
-        pushBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+        pushBar = ProgressBar(act, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
             progressTintList = android.content.res.ColorStateList.valueOf(Ui.ACCENT)
             progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Ui.SURFACE_HIGH)
@@ -171,7 +171,7 @@ class FilesActivity : Activity() {
         root.addView(pushRow, match)
 
         // 空态
-        emptyText = Ui.text(this, "", 13, Ui.TEXT_3).apply {
+        emptyText = Ui.text(act, "", 13, Ui.TEXT_3).apply {
             gravity = Gravity.CENTER
             visibility = View.GONE
             setPadding(0, dp(48), 0, 0)
@@ -180,7 +180,7 @@ class FilesActivity : Activity() {
 
         // 列表
         adapter = Adapter()
-        listView = ListView(this).apply {
+        listView = ListView(act).apply {
             dividerHeight = 0
             setBackgroundColor(Color.TRANSPARENT)
             cacheColorHint = Color.TRANSPARENT
@@ -195,23 +195,23 @@ class FilesActivity : Activity() {
             topMargin = dp(6)
         })
 
-        // 底部多选操作栏(固定底,多选时滑入)
-        val bottomWrap = LinearLayout(this).apply {
+        // 底部多选操作栏
+        val bottomWrap = LinearLayout(act).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Ui.SURFACE_HIGH)
             setPadding(dp(14), dp(10), dp(14), dp(14))
             visibility = View.GONE
         }
-        selectText = Ui.text(this, "已选 0", 12, Ui.TEXT_2, Ui.TITLE)
+        selectText = Ui.text(act, "已选 0 项", 12, Ui.TEXT_2, Ui.TITLE)
         bottomWrap.addView(selectText, match)
-        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        shareBtn = Ui.primaryButton(this, "分享")
-        deleteBtn = Ui.ghostButton(this, "删除", danger = true)
-        moreBtn = Ui.ghostButton(this, "更多").apply { isEnabled = false }
-        val cancelBtn = Ui.ghostButton(this, "取消")
+        val actions = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        shareBtn = Ui.primaryButton(act, "分享")
+        deleteBtn = Ui.ghostButton(act, "删除", danger = true)
+        moreBtn = Ui.ghostButton(act, "更多").apply { isEnabled = false }
+        val cancelBtn = Ui.ghostButton(act, "取消")
         shareBtn.setOnClickListener { shareSelected() }
         deleteBtn.setOnClickListener { deleteSelected() }
-        moreBtn.setOnClickListener { showMoreForSingle() }
+        moreBtn.setOnClickListener { showMore() }
         cancelBtn.setOnClickListener { exitSelection() }
         actions.addView(shareBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         actions.addView(deleteBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(6) })
@@ -219,11 +219,33 @@ class FilesActivity : Activity() {
         actions.addView(cancelBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(6) })
         bottomWrap.addView(actions, match.apply { topMargin = dp(8) })
 
-        val screen = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Ui.BG) }
+        val screen = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Ui.BG) }
         screen.addView(root, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         screen.addView(bottomWrap, match)
+        bottomBar = bottomWrap
+        markTab(tab)
+        return screen
+    }
 
-        setContentView(screen)
+    /** 壳容器切到本页时刷新数据。 */
+    fun onResume() {
+        if (tab == "浏览") refreshStorage()
+        load()
+    }
+
+    /** @return true = 已消费(返回键不退出页面)。 */
+    fun onBackPressed(): Boolean {
+        return when {
+            selectionMode -> {
+                exitSelection()
+                true
+            }
+            tab == "浏览" && browsePath != ROOT -> {
+                navigateUp()
+                true
+            }
+            else -> false
+        }
     }
 
     // ── 数据加载 ────────────────────────────────────────────────────
@@ -234,9 +256,9 @@ class FilesActivity : Activity() {
             val on = b.text == t
             b.setTextColor(if (on) Color.parseColor("#0A2B29") else Ui.TEXT_2)
             b.background = if (on) {
-                Ui.ripple(this, Ui.pill(this, Ui.ACCENT))
+                Ui.ripple(act, Ui.pill(act, Ui.ACCENT))
             } else {
-                Ui.ripple(this, Ui.card(this, Ui.SURFACE, 999, Ui.STROKE, 1))
+                Ui.ripple(act, Ui.card(act, Ui.SURFACE, 999, Ui.STROKE, 1))
             }
             b.setTypeface(null, if (on) Typeface.BOLD else Typeface.NORMAL)
         }
@@ -252,8 +274,14 @@ class FilesActivity : Activity() {
         storageText.visibility = if (browse) View.VISIBLE else View.GONE
         if (browse) {
             browsePath = ROOT
+            sortBy = FileStore.SortBy.NAME
+            sortAsc = true
             refreshStorage()
+        } else {
+            sortBy = FileStore.SortBy.TIME
+            sortAsc = false
         }
+        updatePasteVisibility()
         load()
     }
 
@@ -271,7 +299,7 @@ class FilesActivity : Activity() {
     }
 
     private fun load() {
-        val context = applicationContext
+        val context = act.applicationContext
         val t = tab
         val path = browsePath
         Thread {
@@ -289,7 +317,7 @@ class FilesActivity : Activity() {
             } catch (e: Exception) {
                 emptyList()
             }
-            runOnUiThread {
+            act.runOnUiThread {
                 if (t != tab || (t == "浏览" && path != browsePath)) return@runOnUiThread
                 items = list
                 applyFilter()
@@ -299,20 +327,99 @@ class FilesActivity : Activity() {
 
     private fun applyFilter() {
         val q = searchEdit.text?.toString()?.trim() ?: ""
-        filtered = if (q.isEmpty()) items else items.filter { it.name.contains(q, ignoreCase = true) }
+        val base = if (q.isEmpty()) items else items.filter { it.name.contains(q, ignoreCase = true) }
+        filtered = FileStore.sorted(base, sortBy, sortAsc)
+        val sortTag = if (q.isEmpty()) "" else " · ${filtered.size} 项"
         titleText.text = when (tab) {
             "浏览" -> "内部存储" + if (browsePath == ROOT) "" else browsePath.removePrefix(ROOT)
-            else -> tab + (if (q.isEmpty()) "" else " · ${filtered.size} 项")
+            else -> tab + sortTag
         }
         val empty = filtered.isEmpty()
         emptyText.text = when {
             !empty -> ""
             q.isNotEmpty() -> "没有匹配「$q」的文件"
-            tab == "浏览" -> "空目录"
+            tab == "浏览" -> "空目录 · 点右上「+ 文件夹」创建"
             else -> "这里还没有文件"
         }
         emptyText.visibility = if (empty) View.VISIBLE else View.GONE
         adapter.notifyDataSetChanged()
+    }
+
+    // ── 排序 / 粘贴 ─────────────────────────────────────────────────
+
+    private fun showSortMenu() {
+        val options = listOf("名称 ↑", "名称 ↓", "时间 ↑", "时间 ↓", "大小 ↑", "大小 ↓")
+        AlertDialog.Builder(act)
+            .setTitle("排序(目录恒在前)")
+            .setItems(options.toTypedArray()) { _, w ->
+                when (w) {
+                    0 -> { sortBy = FileStore.SortBy.NAME; sortAsc = true }
+                    1 -> { sortBy = FileStore.SortBy.NAME; sortAsc = false }
+                    2 -> { sortBy = FileStore.SortBy.TIME; sortAsc = true }
+                    3 -> { sortBy = FileStore.SortBy.TIME; sortAsc = false }
+                    4 -> { sortBy = FileStore.SortBy.SIZE; sortAsc = true }
+                    5 -> { sortBy = FileStore.SortBy.SIZE; sortAsc = false }
+                }
+                applyFilter()
+            }
+            .show()
+    }
+
+    private fun updatePasteVisibility() {
+        pasteBtn.visibility = if (tab == "浏览" && clipPaths.isNotEmpty()) View.VISIBLE else View.GONE
+    }
+
+    private fun copySelected() = clipSelected(ClipMode.COPY)
+
+    private fun cutSelected() = clipSelected(ClipMode.CUT)
+
+    private fun clipSelected(mode: ClipMode) {
+        val paths = selected.toList()
+        if (paths.isEmpty()) return
+        val hasDir = paths.any { path -> items.firstOrNull { it.path == path }?.dir == true }
+        clipMode = mode
+        clipPaths = paths
+        exitSelection()
+        updatePasteVisibility()
+        toast(
+            when {
+                mode == ClipMode.COPY && hasDir -> "已复制 ${paths.size} 项(文件夹将整体复制),去目标目录点「粘贴」"
+                mode == ClipMode.COPY -> "已复制 ${paths.size} 项,去目标目录点「粘贴」"
+                hasDir -> "已剪切 ${paths.size} 项,去目标目录点「粘贴」"
+                else -> "已剪切 ${paths.size} 项,去目标目录点「粘贴」"
+            },
+        )
+    }
+
+    private fun pasteClipboard() {
+        val mode = clipMode ?: return
+        val paths = clipPaths
+        val dest = File(browsePath)
+        Thread {
+            var okCount = 0
+            for (p in paths) {
+                val f = File(p)
+                if (!f.exists()) continue
+                // 防自嵌套:目录不能粘贴进自身或其后代
+                if (f.isDirectory) {
+                    val self = f.canonicalPath
+                    val target = dest.canonicalPath
+                    if (target == self || target.startsWith(self + File.separator)) continue
+                }
+                val ok = if (mode == ClipMode.COPY) FileStore.copyTo(f, dest) else FileStore.moveTo(f, dest)
+                if (ok) okCount++
+            }
+            val moved = mode == ClipMode.CUT
+            act.runOnUiThread {
+                if (moved) {
+                    clipMode = null
+                    clipPaths = emptyList()
+                    updatePasteVisibility()
+                }
+                toast("已${if (moved) "移动" else "复制"} $okCount/${paths.size} 项")
+                load()
+            }
+        }.start()
     }
 
     // ── 行交互 ──────────────────────────────────────────────────────
@@ -342,19 +449,11 @@ class FilesActivity : Activity() {
     }
 
     private fun selectBarShow() {
-        // 底部操作栏固定在 screen 根的第 2 个子 View
-        findBottomBar()?.visibility = View.VISIBLE
-    }
-
-    private fun findBottomBar(): LinearLayout? {
-        val content = findViewById<ViewGroup>(android.R.id.content)
-        val screen = content.getChildAt(0) as? LinearLayout ?: return null
-        return screen.getChildAt(1) as? LinearLayout
+        bottomBar.visibility = View.VISIBLE
     }
 
     private fun toggleSelect(item: FileStore.Item) {
-        val p = item.path
-        if (!selected.add(p)) selected.remove(p)
+        if (!selected.add(item.path)) selected.remove(item.path)
         refreshSelectionBar()
     }
 
@@ -362,42 +461,63 @@ class FilesActivity : Activity() {
         selectText.text = "已选 ${selected.size} 项"
         shareBtn.text = "分享(${selected.size})"
         deleteBtn.text = "删除(${selected.size})"
-        moreBtn.isEnabled = selected.size == 1
+        moreBtn.isEnabled = selected.isNotEmpty()
         adapter.notifyDataSetChanged()
     }
 
     private fun exitSelection() {
         selectionMode = false
         selected.clear()
-        findBottomBar()?.visibility = View.GONE
+        bottomBar.visibility = View.GONE
         refreshSelectionBar()
     }
 
     // ── 批量操作 ────────────────────────────────────────────────────
 
+    private fun selectedItems(): List<FileStore.Item> = selected.mapNotNull { p -> items.firstOrNull { it.path == p } }
+
     private fun shareSelected() {
-        val files = selected.mapNotNull { p -> items.firstOrNull { it.path == p } }.filter { !it.dir }
-        if (files.isEmpty()) {
-            toast("文件夹暂不支持推送,请选择文件")
-            return
-        }
+        val sel = selectedItems()
+        if (sel.isEmpty()) return
         val svc = ConnectionService.instance
         if (svc == null || !svc.hasConnectedDesktop()) {
-            toast("未连接电脑——请先在主界面配对并连接")
+            toast("未连接电脑——请先在首页配对并连接")
             return
         }
         if (pushing) return
-        pushQueue.clear()
-        pushQueue.addAll(files)
-        pushing = true
-        pushNext()
+        val files = sel.filter { !it.dir }
+        val folders = sel.filter { it.dir }
+        if (folders.isEmpty()) {
+            pushQueue.clear()
+            pushQueue.addAll(files.map { File(it.path) })
+            pushing = true
+            pushNext()
+            return
+        }
+        // 含文件夹 → 自动打包为一个 ZIP 临时文件再推送
+        Thread {
+            val tmp = File(act.cacheDir, "APartner-${System.currentTimeMillis()}.zip")
+            val ok = FileStore.zipOf(sel.map { File(it.path) }, tmp)
+            act.runOnUiThread {
+                if (!ok) {
+                    toast("打包 ZIP 失败,已取消推送")
+                } else {
+                    pushQueue.clear()
+                    pushQueue.add(tmp)
+                    pushing = true
+                    pushNext(cleanupAfter = tmp)
+                }
+            }
+        }.start()
     }
 
-    private fun pushNext() {
+    /** 依次推送队列;cleanupAfter 非空时全部推完删临时包。 */
+    private fun pushNext(cleanupAfter: File? = null) {
         val next = pushQueue.removeFirstOrNull()
         if (next == null) {
             pushing = false
             pushRow.visibility = View.GONE
+            cleanupAfter?.delete()
             toast("全部推送完成")
             exitSelection()
             return
@@ -405,47 +525,47 @@ class FilesActivity : Activity() {
         pushRow.visibility = View.VISIBLE
         pushBar.progress = 0
         pushText.text = "推送中:${next.name}"
-        val file = File(next.path)
-        val sent = ConnectionService.instance?.pushToDesktop(file, object : PushController.Listener {
+        val sent = ConnectionService.instance?.pushToDesktop(next, object : PushController.Listener {
             override fun onProgress(sentBytes: Long, total: Long) {
                 val pct = if (total <= 0) 100 else ((sentBytes * 100) / total).toInt()
-                runOnUiThread {
+                act.runOnUiThread {
                     pushBar.progress = pct
-                    pushText.text = "推送中:${next.name} $pct%(${next.sizeText})"
+                    pushText.text = "推送中:${next.name} $pct%"
                 }
             }
 
             override fun onDone() {
-                runOnUiThread {
+                act.runOnUiThread {
                     toast("已发送:${next.name}")
-                    pushNext()
+                    pushNext(cleanupAfter)
                 }
             }
 
             override fun onError(message: String) {
-                runOnUiThread {
+                act.runOnUiThread {
                     toast("推送失败:${next.name}($message)")
-                    pushNext()
+                    pushNext(cleanupAfter)
                 }
             }
         })
         if (sent != true) {
             pushing = false
             pushRow.visibility = View.GONE
+            cleanupAfter?.delete()
             toast("推送启动失败(连接可能已断开)")
         }
     }
 
     private fun deleteSelected() {
         val paths = selected.toList()
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(act)
             .setTitle("删除")
             .setMessage("删除已选 ${paths.size} 项?此操作不可撤销。")
             .setPositiveButton("删除") { _, _ ->
                 Thread {
                     var okCount = 0
                     for (p in paths) if (FileStore.delete(p)) okCount++
-                    runOnUiThread {
+                    act.runOnUiThread {
                         toast("已删除 $okCount/${paths.size} 项")
                         exitSelection()
                         load()
@@ -456,36 +576,69 @@ class FilesActivity : Activity() {
             .show()
     }
 
-    private fun showMoreForSingle() {
-        if (selected.size != 1) return
-        val item = items.firstOrNull { it.path == selected.first() } ?: return
-        val options = if (item.dir) arrayOf("重命名", "详情") else arrayOf("分享到电脑", "重命名", "详情")
-        AlertDialog.Builder(this)
-            .setTitle(item.name)
-            .setItems(options) { _, which ->
+    /** 更多菜单:作用于全部已选项;单项追加 重命名/详情,浏览模式 zip 追加 解压到此处。 */
+    private fun showMore() {
+        if (selected.isEmpty()) return
+        val sel = selectedItems()
+        val single = sel.singleOrNull()
+        val options = mutableListOf("复制", "剪切")
+        val zipFile = single?.let { !it.dir && it.name.endsWith(".zip", ignoreCase = true) } == true
+        if (sel.any { !it.dir }) options.add("压缩为 ZIP")
+        if (single != null && zipFile && tab == "浏览") options.add("解压到此处")
+        if (single != null) options.add("重命名")
+        options.add("详情")
+        AlertDialog.Builder(act)
+            .setTitle(if (sel.size == 1) sel[0].name else "已选 ${sel.size} 项")
+            .setItems(options.toTypedArray()) { _, which ->
                 when (options[which]) {
-                    "分享到电脑" -> {
-                        selected.clear()
-                        selected.add(item.path)
-                        shareSelected()
-                    }
-                    "重命名" -> showRename(item)
-                    "详情" -> showDetails(item)
+                    "复制" -> copySelected()
+                    "剪切" -> cutSelected()
+                    "压缩为 ZIP" -> zipSelected()
+                    "解压到此处" -> single?.let { unzipHere(it) }
+                    "重命名" -> single?.let { showRename(it) }
+                    "详情" -> single?.let { showDetails(it) }
                 }
             }
             .show()
     }
 
+    private fun zipSelected() {
+        val sel = selectedItems().filter { !it.dir || true } // 文件夹也参与打包
+        if (sel.isEmpty()) return
+        val outDir = if (tab == "浏览") File(browsePath) else File(ROOT, "Download")
+        val baseName = if (sel.size == 1) sel[0].name.removeSuffix(".zip") else "APartner"
+        Thread {
+            val out = FileStore.uniqueChild(outDir, "$baseName.zip")
+            val ok = FileStore.zipOf(sel.map { File(it.path) }, out)
+            act.runOnUiThread {
+                toast(if (ok) "已压缩为 ${out.name}" else "压缩失败")
+                if (ok) load()
+            }
+        }.start()
+    }
+
+    private fun unzipHere(item: FileStore.Item) {
+        val zip = File(item.path)
+        val dest = File(browsePath)
+        Thread {
+            val ok = FileStore.unzip(zip, dest)
+            act.runOnUiThread {
+                toast(if (ok) "已解压到当前目录" else "解压失败(损坏或路径非法)")
+                if (ok) load()
+            }
+        }.start()
+    }
+
     private fun showRename(item: FileStore.Item) {
-        val input = EditText(this).apply {
+        val input = EditText(act).apply {
             setText(item.name)
             setSelection(item.name.length)
             setTextColor(Ui.TEXT)
             setHintTextColor(Ui.TEXT_3)
-            background = Ui.card(this@FilesActivity, Ui.SURFACE_HIGH, 10)
+            background = Ui.card(act, Ui.SURFACE_HIGH, 10)
             setPadding(dp(12), dp(10), dp(12), dp(10))
         }
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(act)
             .setTitle("重命名")
             .setView(input)
             .setPositiveButton("确定") { _, _ ->
@@ -493,7 +646,7 @@ class FilesActivity : Activity() {
                 if (newName.isEmpty() || newName == item.name) return@setPositiveButton
                 Thread {
                     val ok = FileStore.rename(item.path, newName)
-                    runOnUiThread {
+                    act.runOnUiThread {
                         toast(if (ok) "已重命名" else "重命名失败(重名或非法字符)")
                         if (ok) {
                             exitSelection()
@@ -507,7 +660,7 @@ class FilesActivity : Activity() {
     }
 
     private fun showDetails(item: FileStore.Item) {
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(act)
             .setTitle(item.name)
             .setMessage(
                 listOf(
@@ -531,14 +684,14 @@ class FilesActivity : Activity() {
     }
 
     private fun onNewFolder() {
-        val input = EditText(this).apply {
+        val input = EditText(act).apply {
             hint = "文件夹名称"
             setTextColor(Ui.TEXT)
             setHintTextColor(Ui.TEXT_3)
-            background = Ui.card(this@FilesActivity, Ui.SURFACE_HIGH, 10)
+            background = Ui.card(act, Ui.SURFACE_HIGH, 10)
             setPadding(dp(12), dp(10), dp(12), dp(10))
         }
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(act)
             .setTitle("新建文件夹")
             .setView(input)
             .setPositiveButton("创建") { _, _ ->
@@ -546,7 +699,7 @@ class FilesActivity : Activity() {
                 if (name.isEmpty()) return@setPositiveButton
                 Thread {
                     val ok = FileStore.mkdir(browsePath, name)
-                    runOnUiThread {
+                    act.runOnUiThread {
                         toast(if (ok) "已创建" else "创建失败(重名或非法字符)")
                         if (ok) load()
                     }
@@ -557,7 +710,7 @@ class FilesActivity : Activity() {
     }
 
     private fun toast(msg: String) {
-        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        Toast.makeText(act, msg, Toast.LENGTH_SHORT).show()
     }
 
     // ── 列表适配器(磁块行)────────────────────────────────────────
@@ -571,33 +724,33 @@ class FilesActivity : Activity() {
             val holder: RowHolder
             val view: View
             if (convertView == null) {
-                val line = LinearLayout(this@FilesActivity).apply {
+                val line = LinearLayout(act).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(dp(8), dp(8), dp(8), dp(8))
                 }
-                val tile = TextView(this@FilesActivity).apply {
+                val tile = TextView(act).apply {
                     gravity = Gravity.CENTER
                     textSize = 17f
                 }
                 line.addView(tile, LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(12) })
-                val col = LinearLayout(this@FilesActivity).apply { orientation = LinearLayout.VERTICAL }
-                val name = TextView(this@FilesActivity).apply {
+                val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+                val name = TextView(act).apply {
                     textSize = 15f
                     setTextColor(Ui.TEXT)
                     maxLines = 1
                     ellipsize = android.text.TextUtils.TruncateAt.START
                 }
-                val meta = TextView(this@FilesActivity).apply { textSize = 11f; setTextColor(Ui.TEXT_3) }
+                val meta = TextView(act).apply { textSize = 11f; setTextColor(Ui.TEXT_3) }
                 col.addView(name, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                 col.addView(meta, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                 line.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                val check = TextView(this@FilesActivity).apply {
+                val check = TextView(act).apply {
                     textSize = 15f
                     gravity = Gravity.CENTER
                     visibility = View.GONE
                 }
-                check.background = Ui.card(this@FilesActivity, Ui.SURFACE_HIGH, 999, Ui.STROKE, 1)
+                check.background = Ui.card(act, Ui.SURFACE_HIGH, 999, Ui.STROKE, 1)
                 line.addView(check, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginStart = dp(8) })
                 view = line
                 holder = RowHolder(tile, name, meta, check, line)
@@ -608,16 +761,16 @@ class FilesActivity : Activity() {
             }
             val item = filtered[position]
             holder.tile.text = item.icon
-            holder.tile.background = Ui.tile(this@FilesActivity, item.tileColor)
+            holder.tile.background = Ui.tile(act, item.tileColor)
             holder.name.text = item.name
             holder.meta.text = "${item.sizeText} · ${item.timeText}"
             val checked = item.path in selected
             holder.check.visibility = if (selectionMode) View.VISIBLE else View.GONE
             holder.check.text = if (checked) "✓" else ""
             holder.check.background = if (checked) {
-                Ui.card(this@FilesActivity, Ui.ACCENT, 999, strokeWidth = 0)
+                Ui.card(act, Ui.ACCENT, 999, strokeWidth = 0)
             } else {
-                Ui.card(this@FilesActivity, Ui.SURFACE_HIGH, 999, Ui.STROKE, 1)
+                Ui.card(act, Ui.SURFACE_HIGH, 999, Ui.STROKE, 1)
             }
             holder.check.setTextColor(Color.parseColor("#0A2B29"))
             holder.row.setBackgroundColor(if (checked) Color.parseColor("#182031") else Color.TRANSPARENT)

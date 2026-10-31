@@ -218,4 +218,126 @@ object FileStore {
             false
         }
     }
+
+    // ── 排序 ────────────────────────────────────────────────────────
+
+    enum class SortBy(val label: String) { NAME("名称"), TIME("时间"), SIZE("大小") }
+
+    /** 浏览模式排序(目录恒在前,组内按所选键升/降序)。 */
+    fun sorted(list: List<Item>, by: SortBy, asc: Boolean): List<Item> {
+        fun order(items: List<Item>): List<Item> = when (by) {
+            SortBy.NAME -> if (asc) items.sortedBy { it.name.lowercase(Locale.US) } else items.sortedByDescending { it.name.lowercase(Locale.US) }
+            SortBy.TIME -> if (asc) items.sortedBy { it.mtime } else items.sortedByDescending { it.mtime }
+            SortBy.SIZE -> if (asc) items.sortedBy { it.size } else items.sortedByDescending { it.size }
+        }
+        return order(list.filter { it.dir }) + order(list.filter { !it.dir })
+    }
+
+    // ── 复制 / 移动 ─────────────────────────────────────────────────
+
+    /** 目标目录内唯一名(重名自动 " (n)")。 */
+    fun uniqueChild(dir: File, name: String): File {
+        val ext = name.lastIndexOf('.').takeIf { it > 0 }?.let { name.substring(it) } ?: ""
+        val stem = if (ext.isEmpty()) name else name.removeSuffix(ext)
+        var candidate = File(dir, name)
+        var i = 2
+        while (candidate.exists()) {
+            candidate = File(dir, "$stem ($i)$ext")
+            i++
+        }
+        return candidate
+    }
+
+    fun copyTo(src: File, destDir: File): Boolean = try {
+        val target = uniqueChild(destDir, src.name)
+        if (src.isDirectory) {
+            src.copyRecursively(target, overwrite = false)
+        } else {
+            src.copyTo(target, overwrite = false)
+        }
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    fun moveTo(src: File, destDir: File): Boolean = try {
+        val target = uniqueChild(destDir, src.name)
+        if (src.renameTo(target)) true else {
+            // 跨目录 rename 失败兜底:复制 + 删源
+            if (src.isDirectory) src.copyRecursively(target, overwrite = false) else src.copyTo(target, overwrite = false)
+            src.deleteRecursively()
+            true
+        }
+    } catch (_: Exception) {
+        false
+    }
+
+    // ── 压缩 / 解压(java.util.zip,零外部依赖)────────────────────
+
+    /** 把若干文件/文件夹打包为 zip;文件夹保留自身为根目录。 */
+    fun zipOf(sources: List<File>, out: File): Boolean = try {
+        java.io.BufferedOutputStream(java.io.FileOutputStream(out)).use { fos ->
+            java.util.zip.ZipOutputStream(fos).use { zos ->
+                for (src in sources) {
+                    if (src.isFile) {
+                        putFile(zos, src, src.name)
+                    } else {
+                        putDir(zos, src, "${src.name}/")
+                    }
+                }
+            }
+        }
+        true
+    } catch (_: Exception) {
+        out.delete()
+        false
+    }
+
+    private fun putDir(zos: java.util.zip.ZipOutputStream, dir: File, prefix: String) {
+        val files = dir.listFiles() ?: return
+        if (files.isEmpty()) {
+            zos.putNextEntry(java.util.zip.ZipEntry(prefix))
+            zos.closeEntry()
+            return
+        }
+        for (f in files) {
+            if (f.isDirectory) putDir(zos, f, "$prefix${f.name}/")
+            else putFile(zos, f, "$prefix${f.name}")
+        }
+    }
+
+    private fun putFile(zos: java.util.zip.ZipOutputStream, f: File, entryName: String) {
+        java.io.BufferedInputStream(java.io.FileInputStream(f)).use { input ->
+            zos.putNextEntry(java.util.zip.ZipEntry(entryName))
+            input.copyTo(zos, 64 * 1024)
+            zos.closeEntry()
+        }
+    }
+
+    /** 解压 zip 到目标目录(Zip Slip 防护:entry 规范路径必须留在目标内)。 */
+    fun unzip(zip: File, destDir: File): Boolean = try {
+        destDir.mkdirs()
+        val destCanonical = destDir.canonicalPath + File.separator
+        java.util.zip.ZipInputStream(java.io.BufferedInputStream(java.io.FileInputStream(zip))).use { zis ->
+            while (true) {
+                val entry = zis.nextEntry ?: break
+                val out = File(destDir, entry.name)
+                if (!out.canonicalPath.startsWith(destCanonical)) {
+                    throw SecurityException("zip 路径逃逸:${entry.name}")
+                }
+                if (entry.isDirectory) {
+                    out.mkdirs()
+                } else {
+                    out.parentFile?.mkdirs()
+                    java.io.BufferedOutputStream(java.io.FileOutputStream(out)).use { bos ->
+                        zis.copyTo(bos, 64 * 1024)
+                    }
+                }
+                zis.closeEntry()
+            }
+        }
+        true
+    } catch (_: Exception) {
+        false
+    }
 }

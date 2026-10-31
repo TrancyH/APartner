@@ -41,8 +41,6 @@
             </intent-filter>
         </activity>
 
-        <!-- 内置文件管理器(分类/浏览/多选/分享到电脑) -->
-        <activity android:name=".FilesActivity" android:exported="false" />
 
         <service
             android:name=".ConnectionService"
