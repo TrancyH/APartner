@@ -18,6 +18,9 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- 电话硬件非必需:短信/来电功能在无电话硬件设备(平板/ChromeOS)上自动降级,避免市场误判不兼容 -->
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+
     <application
         android:label="APartner"
         android:icon="@android:drawable/stat_sys_phone_call"
