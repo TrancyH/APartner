@@ -52,8 +52,10 @@ class MainActivity : Activity() {
     // 壳:dock + 双页
     private lateinit var homeRoot: View
     private lateinit var filesRoot: View
-    private lateinit var dockHome: LinearLayout
-    private lateinit var dockFiles: LinearLayout
+    private lateinit var dockHomeIcon: DockIconView
+    private lateinit var dockHomeLabel: TextView
+    private lateinit var dockFilesIcon: DockIconView
+    private lateinit var dockFilesLabel: TextView
     private lateinit var filesPage: FilesPage
     private var currentTab = "home"
 
@@ -97,39 +99,55 @@ class MainActivity : Activity() {
     }
 
     private fun markDock(t: String) {
-        setDockState(dockHome, t == "home")
-        setDockState(dockFiles, t == "files")
+        dockHomeIcon.active = t == "home"
+        dockFilesIcon.active = t == "files"
+        dockHomeLabel.setTextColor(if (t == "home") Ui.ACCENT else Ui.TEXT_3)
+        dockFilesLabel.setTextColor(if (t == "files") Ui.ACCENT else Ui.TEXT_3)
     }
 
-    private fun setDockState(col: LinearLayout, on: Boolean) {
-        (col.getChildAt(0) as TextView).setTextColor(if (on) Ui.ACCENT else Ui.TEXT_3)
-        (col.getChildAt(1) as TextView).setTextColor(if (on) Ui.ACCENT else Ui.TEXT_3)
+    /** dock 项:自绘图标 + 标签;FrameLayout 承载 col(layout_gravity=center,绝对居中)。 */
+    private fun buildDockItem(kind: DockIconView.Kind, label: String): Triple<FrameLayout, DockIconView, TextView> {
+        val icon = DockIconView(this, kind)
+        val lab = Ui.text(this, label, 11, Ui.TEXT_3).apply {
+            gravity = Gravity.CENTER_HORIZONTAL // 文本在自身宽度内居中(终极兜底)
+            setPadding(0, dp(3), 0, 0)
+        }
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(10), dp(9), dp(10), dp(9))
+            background = Ui.ripple(this@MainActivity, Ui.card(this@MainActivity, Color.TRANSPARENT, 12, strokeWidth = 0))
+            addView(icon, LinearLayout.LayoutParams(dp(26), dp(26)))
+            addView(lab, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        val wrap = FrameLayout(this)
+        wrap.addView(
+            col,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER,
+            ),
+        )
+        return Triple(wrap, icon, lab)
     }
 
     private fun buildDock(): LinearLayout {
+        val (homeCol, homeIcon, homeLab) = buildDockItem(DockIconView.Kind.HOME, "首页")
+        val (filesCol, filesIcon, filesLab) = buildDockItem(DockIconView.Kind.FILES, "文件管理")
+        dockHomeIcon = homeIcon
+        dockHomeLabel = homeLab
+        dockFilesIcon = filesIcon
+        dockFilesLabel = filesLab
+        homeCol.setOnClickListener { switchTab("home") }
+        filesCol.setOnClickListener { switchTab("files") }
+        markDock("home")
         val dock = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Ui.SURFACE_HIGH)
-            setPadding(dp(8), dp(8), dp(8), dp(10))
         }
-        dockHome = dockItem("⌂", "首页")
-        dockFiles = dockItem("☰", "文件管理")
-        dockHome.setOnClickListener { switchTab("home") }
-        dockFiles.setOnClickListener { switchTab("files") }
-        dock.addView(dockHome, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        dock.addView(dockFiles, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        markDock("home")
+        dock.addView(homeCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+        dock.addView(filesCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
         return dock
     }
-
-    private fun dockItem(glyph: String, label: String): LinearLayout =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            background = Ui.ripple(this@MainActivity, Ui.card(this@MainActivity, Color.TRANSPARENT, 10, strokeWidth = 0))
-            addView(Ui.text(this@MainActivity, glyph, 19, Ui.TEXT_3))
-            addView(Ui.text(this@MainActivity, label, 10, Ui.TEXT_3))
-        }
 
     override fun onResume() {
         super.onResume()
@@ -343,6 +361,10 @@ class MainActivity : Activity() {
 
         val screen = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Ui.BG) }
         screen.addView(container, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        screen.addView(
+            View(this).apply { setBackgroundColor(Ui.STROKE) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)),
+        )
         screen.addView(buildDock(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         setContentView(screen)
