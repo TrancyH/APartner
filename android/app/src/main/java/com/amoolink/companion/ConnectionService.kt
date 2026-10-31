@@ -17,6 +17,7 @@ import android.telephony.TelephonyManager
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
+import java.io.File
 import java.io.BufferedOutputStream
 import java.net.InetAddress
 import java.net.NetworkInterface
@@ -349,6 +350,8 @@ class ConnectionService : Service() {
             // 远程文件管理(协议 v2;FsHandler 异步处理并在 io 线程回帧)
             "fs_list", "fs_stat", "fs_read", "fs_write", "fs_write_end", "fs_delete" ->
                 FsHandler.handle(this, conn, id, type, frame)
+            // 反向推送响应(手机→桌面 fs_push_* 的 ready/ack/done,转交推送状态机)
+            "fs_push_ready", "fs_push_ack", "fs_push_done" -> PushController.onResponse(frame)
             else -> conn.send(ok(id, "error") { put("code", "unknown_type"); put("message", type) })
         }
         // 配对模式但收到非配对消息且未钉扎 → 断开
@@ -454,6 +457,16 @@ class ConnectionService : Service() {
     }
 
     fun connectedDesktops(): List<String> = sessions.keys.toList()
+
+    // ── 反向推送(文件管理器「分享到电脑」)────────────────────────
+
+    fun hasConnectedDesktop(): Boolean = sessions.isNotEmpty()
+
+    /** 经任一已连接桌面推送文件;false = 无连接或已有推送在进行。 */
+    fun pushToDesktop(file: File, listener: PushController.Listener): Boolean {
+        val conn = sessions.values.firstOrNull() ?: return false
+        return PushController.push(conn, file, file.name, listener)
+    }
 
     // ── 剪贴板 ───────────────────────────────────────────────────────
 

@@ -25,6 +25,7 @@ class TestHookReceiver : BroadcastReceiver() {
         const val ACT_TEST_REPLY_RECV = "com.amoolink.companion.ACTION_TEST_REPLY_RECV"
         const val ACT_DUMP_PAIRING = "com.amoolink.companion.ACTION_DUMP_PAIRING"
         const val ACT_TEST_FS = "com.amoolink.companion.ACTION_TEST_FS"
+        const val ACT_TEST_PUSH = "com.amoolink.companion.ACTION_TEST_PUSH"
 
         /** 最近一次自研回复收到的内容(探针经通知回路读取,不依赖此静态量)。 */
         @Volatile
@@ -56,6 +57,8 @@ class TestHookReceiver : BroadcastReceiver() {
                 ?: android.util.Log.i("AmooLink", "M5STATE pairing=false service=down")
 
             ACT_TEST_FS -> testFs(context)
+
+            ACT_TEST_PUSH -> testPush(context)
 
             "com.amoolink.companion.ACTION_TLS_TEST" -> {
                 val host = intent.getStringExtra("host") ?: "192.168.5.6"
@@ -215,6 +218,42 @@ class TestHookReceiver : BroadcastReceiver() {
     private fun echoClipboard(context: Context) {
         val clip = ConnectionService.instance?.readClipboard() ?: "(不可读)"
         postMarkerNotification(context, "AMOOCLIP:$clip")
+    }
+
+    /**
+     * 反向推送自测:生成 Download/apartner-push-probe.bin(512KiB+7 随机字节)并推给已连接桌面,
+     * logcat 打 `M5PUSH ok=… sha=…`(桌面探针据此闭环验证 fs_push_* 全链路)。文件保留供比对。
+     */
+    private fun testPush(context: Context) {
+        val svc = ConnectionService.instance
+        if (svc == null || !svc.hasConnectedDesktop()) {
+            android.util.Log.i("AmooLink", "M5PUSH ok=false err=no_desktop")
+            return
+        }
+        val dir = java.io.File(
+            android.os.Environment.getExternalStorageDirectory(),
+            android.os.Environment.DIRECTORY_DOWNLOADS,
+        )
+        dir.mkdirs()
+        val file = java.io.File(dir, "apartner-push-probe.bin")
+        java.io.RandomAccessFile(file, "rw").use { raf ->
+            raf.setLength(0)
+            val data = ByteArray(512 * 1024 + 7) { (it % 249).toByte() }
+            raf.seek(0)
+            raf.write(data)
+        }
+        val pushed = svc.pushToDesktop(file, object : PushController.Listener {
+            override fun onProgress(sent: Long, total: Long) {}
+
+            override fun onDone() {
+                android.util.Log.i("AmooLink", "M5PUSH ok=true path=${file.absolutePath}")
+            }
+
+            override fun onError(message: String) {
+                android.util.Log.i("AmooLink", "M5PUSH ok=false err=$message")
+            }
+        })
+        if (!pushed) android.util.Log.i("AmooLink", "M5PUSH ok=false err=push_rejected")
     }
 
     /**

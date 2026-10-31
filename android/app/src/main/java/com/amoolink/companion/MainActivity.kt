@@ -181,6 +181,14 @@ class MainActivity : Activity() {
         col.addView(autoSwitch, params)
 
         col.addView(TextView(this).apply {
+            text = "文件"
+            textSize = 16f; setPadding(0, dp(24), 0, dp(4))
+        }, params)
+        col.addView(guideRow("文件管理(浏览 / 分类 / 分享到电脑)") {
+            startActivity(Intent(this, FilesActivity::class.java))
+        })
+
+        col.addView(TextView(this).apply {
             text = "已配对电脑"
             textSize = 16f; setPadding(0, dp(24), 0, dp(4))
         }, params)

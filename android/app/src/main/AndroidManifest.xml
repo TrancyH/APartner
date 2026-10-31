@@ -41,6 +41,9 @@
             </intent-filter>
         </activity>
 
+        <!-- 内置文件管理器(分类/浏览/多选/分享到电脑) -->
+        <activity android:name=".FilesActivity" android:exported="false" />
+
         <service
             android:name=".ConnectionService"
             android:exported="false"
@@ -72,6 +75,7 @@
                 <action android:name="com.amoolink.companion.ACTION_TEST_REPLY_RECV" />
                 <action android:name="com.amoolink.companion.ACTION_DUMP_PAIRING" />
                 <action android:name="com.amoolink.companion.ACTION_TEST_FS" />
+                <action android:name="com.amoolink.companion.ACTION_TEST_PUSH" />
                 <action android:name="com.amoolink.companion.ACTION_NET_TEST" />
                 <action android:name="com.amoolink.companion.ACTION_TLS_TEST" />
                 <action android:name="com.amoolink.companion.ACTION_TLS_TEST2" />
