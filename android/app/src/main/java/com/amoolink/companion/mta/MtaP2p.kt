@@ -3,6 +3,7 @@ package com.amoolink.companion.mta
 import android.annotation.SuppressLint
 import android.content.Context
 import android.net.wifi.p2p.WifiP2pConfig
+import android.os.Build
 import android.net.wifi.p2p.WifiP2pGroup
 import android.net.wifi.p2p.WifiP2pManager
 import android.util.Log
@@ -29,6 +30,9 @@ object MtaP2p {
         channel: WifiP2pManager.Channel,
         timeoutMs: Long = 1_500,
     ): String? {
+        // requestDeviceInfo 是 API 29 才加的:minSdk 26 上调用会 NoSuchMethodError,
+        // 26~28 直接返回 null,交给「接口地址 → 组主地址」那两条退路。
+        if (Build.VERSION.SDK_INT < 29) return null
         val future = CompletableDeferred<String?>()
         try {
             manager.requestDeviceInfo(channel) { device ->
