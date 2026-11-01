@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  APartner 图标:一个「A」+ 上方一颗青点。
+  A 是 APartner 的首字母;青点代表「对方那台设备」——点在 A 的头顶等着落下,
+  语义就是两台设备配对/连接。所有元素都落在自适应图标中央 66dp 的安全区内,
+  圆形/圆角/水滴等任何系统遮罩下都不会被切。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- A:两腿 + 横杠 -->
+    <path
+        android:pathData="M54,41 L32.5,78.5 M54,41 L75.5,78.5 M39.5,62.5 L68.5,62.5"
+        android:strokeColor="#E6EBF2"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <!-- 青点 -->
+    <path
+        android:pathData="M54,30.5 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0"
+        android:fillColor="#4FD1C5" />
+</vector>
