@@ -13,3 +13,6 @@ captures/
 # 其他
 .mimosa/
 *.log
+
+# 打包产物(APK 不进仓库,见 dist/ 本地目录)
+dist/
