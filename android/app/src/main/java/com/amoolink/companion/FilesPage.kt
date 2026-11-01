@@ -756,16 +756,39 @@ class FilesPage(private val act: Activity) {
             return
         }
         mtaFound.clear()
-        val filter = android.bluetooth.le.ScanFilter.Builder()
+        // 双 filter(OR):①小米原生广播的标准 base 3331(实测 HyperOS AD 形式)
+        // ②CatShare 形式 008123456789 base(兼容 CatShare/其他类原生接收端)
+        val filterXiaomi = android.bluetooth.le.ScanFilter.Builder()
+            .setServiceUuid(android.os.ParcelUuid(java.util.UUID.fromString("00003331-0000-1000-8000-00805f9b34fb")))
+            .build()
+        val filterCatShare = android.bluetooth.le.ScanFilter.Builder()
             .setServiceUuid(android.os.ParcelUuid(MtaConst.ADV_SERVICE_UUID))
             .build()
         val settings = android.bluetooth.le.ScanSettings.Builder()
             .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setLegacy(true)
             .build()
         val callback = object : android.bluetooth.le.ScanCallback() {
+            private val seen = java.util.concurrent.ConcurrentHashMap<String, Long>()
             override fun onScanResult(callbackType: Int, result: android.bluetooth.le.ScanResult) {
-                val record = result.scanRecord ?: return
-                val dataMap = record.serviceData ?: return
+                val record = result.scanRecord
+                val now = System.currentTimeMillis()
+                val last = seen[result.device.address] ?: 0
+                if (now - last < 2000) return
+                seen[result.device.address] = now
+                val svcUuids = record?.serviceUuids?.joinToString { it.uuid.toString() } ?: "-"
+                val svcData = record?.serviceData?.entries?.joinToString(";") { (u, d) ->
+                    "${u.uuid}=" + d.take(8).joinToString("") { "%02x".format(it) }
+                } ?: "-"
+                val mfg = record?.manufacturerSpecificData?.let { m ->
+                    (0 until m.size()).map { k -> String.format("0x%04x[%dB]", m.keyAt(k), m.valueAt(k).size) }.joinToString(",")
+                } ?: "-"
+                android.util.Log.i(
+                    "MtaScanDebug",
+                    "addr=${result.device.address} name=${result.device.name} rssi=${result.rssi} " +
+                        "uuids=[$svcUuids] svcData=[$svcData] mfg=[$mfg] raw=${record?.bytes?.take(20)?.joinToString("") { "%02x".format(it) }}",
+                )
+                val dataMap = record?.serviceData ?: return
                 var supports5G = true
                 var hasBrand = false
                 var id = ""
@@ -786,9 +809,21 @@ class FilesPage(private val act: Activity) {
                         name = String(nameBytes, Charsets.UTF_8).trimEnd('\u0000')
                     }
                 }
-                if (id.isEmpty() || name.isEmpty()) return
-                Log.i("MtaScan", "discovered id=$id name=$name 5g=$supports5G rssi=${result.rssi}")
-                mtaFound[id] = MtaFound(result.device, id, name, supports5G)
+                // 小米原生广播:name 缺省、id 在 svcData/scanResp 因厂商而异 → 兜底
+                val finalName = name.ifEmpty {
+                    (result.scanRecord?.deviceName ?: result.device.name ?: "").ifEmpty { "MTA-${result.device.address.takeLast(5)}" }
+                }
+                // 排除自身:广播 serviceData(000001ff-…)前 2 字节 == 本机 SENDER_ID
+                // (不能按 UUID base 排除——会误杀同为该 base 形式的其他互传设备,如 HUAWEI)
+                val selfBeacon = (result.scanRecord?.serviceData?.get(
+                    android.os.ParcelUuid(MtaConst.ADV_DATA_5G_BRAND_UUID),
+                ))?.let { d -> d.size >= 2 && String.format("%04x", (d[0].toInt() shl 8) or d[1].toInt()) == MtaConst.SENDER_ID } == true
+                if (selfBeacon) {
+                    return@onScanResult
+                }
+                val finalId = id.ifEmpty { result.device.address }
+                Log.i("MtaScan", "discovered id=$finalId name=$finalName 5g=$supports5G rssi=${result.rssi}")
+                mtaFound[finalId] = MtaFound(result.device, finalId, finalName, supports5G)
                 renderMtaRows(slot, loading, items)
             }
 
@@ -798,7 +833,7 @@ class FilesPage(private val act: Activity) {
         }
         mtaScanCallback = callback
         try {
-            scanner.startScan(listOf(filter), settings, callback)
+            scanner.startScan(listOf(filterXiaomi, filterCatShare), settings, callback)
         } catch (e: SecurityException) {
             mtaScanCallback = null
             loading.text = "蓝牙扫描被拒绝——请授权 BLUETOOTH_SCAN"
