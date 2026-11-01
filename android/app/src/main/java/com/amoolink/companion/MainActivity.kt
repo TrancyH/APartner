@@ -641,7 +641,7 @@ class MainActivity : Activity() {
         val content = findViewById<ViewGroup>(android.R.id.content)
 
         val scrim = View(this).apply { setBackgroundColor(0x99000000.toInt()); alpha = 0f }
-        scrim.setOnClickListener { answerIncoming(false) }
+        scrim.setOnClickListener { answerIncoming(req, false) }
 
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -694,8 +694,8 @@ class MainActivity : Activity() {
         val accept = Ui.primaryButton(this, "接受")
         reject.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) }
         accept.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        reject.setOnClickListener { answerIncoming(false) }
-        accept.setOnClickListener { answerIncoming(true) }
+        reject.setOnClickListener { answerIncoming(req, false) }
+        accept.setOnClickListener { answerIncoming(req, true) }
         btns.addView(reject)
         btns.addView(accept)
         panel.addView(btns, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -717,13 +717,13 @@ class MainActivity : Activity() {
         scrim.animate().alpha(1f).setDuration(180).start()
     }
 
-    private fun answerIncoming(accept: Boolean) {
+    private fun answerIncoming(req: MtaUiBridge.IncomingRequest, accept: Boolean) {
         val overlay = incomingOverlay ?: return
         incomingOverlay = null
         val panel = overlay.getChildAt(1)
         panel.animate().translationY(panel.height.toFloat()).setDuration(200)
             .withEndAction { (overlay.parent as? ViewGroup)?.removeView(overlay) }.start()
         overlay.getChildAt(0).animate().alpha(0f).setDuration(200).start()
-        MtaReceiverService.MtaLinkBus.userAccept = accept
+        req.answer(accept)
     }
 }

@@ -493,7 +493,7 @@ class MtaReceiverService : Service() {
                     },
                 )
                 if (emitted) {
-                    answer = withTimeoutOrNull(20_000) { accepted.await() }
+                    answer = withTimeoutOrNull(60_000) { accepted.await() }
                 } else {
                     nm.notify(ASK_ID, askNotification(taskIdStr.toIntOrNull() ?: 0, senderName, fileName, fileCount, totalSize))
                     answer = withTimeoutOrNull(10_000) {
