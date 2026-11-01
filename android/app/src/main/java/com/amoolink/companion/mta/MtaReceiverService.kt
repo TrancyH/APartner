@@ -42,7 +42,6 @@ import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 import java.util.zip.ZipInputStream
 import javax.net.ssl.SSLContext
 
@@ -64,6 +63,21 @@ class MtaReceiverService : Service() {
         private const val PROGRESS_ID = 103
         private const val CH = "mta_transfer"
 
+        /** BLE 广播/GATT 需要的运行时权限(缺任意一个整条链路不可用)。 */
+        @android.annotation.SuppressLint("InlinedApi")
+        fun missingBlePermissions(context: Context): List<String> {
+            val need = mutableListOf<String>()
+            if (Build.VERSION.SDK_INT >= 31) {
+                need.add(android.Manifest.permission.BLUETOOTH_SCAN)
+                need.add(android.Manifest.permission.BLUETOOTH_ADVERTISE)
+                need.add(android.Manifest.permission.BLUETOOTH_CONNECT)
+            }
+            if (Build.VERSION.SDK_INT >= 33) need.add(android.Manifest.permission.NEARBY_WIFI_DEVICES)
+            return need.filter {
+                context.checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+        }
+
         /** 首页「互传联盟接收」开关。 */
         fun setEnabled(context: Context, enabled: Boolean) {
             if (enabled) {
@@ -83,6 +97,10 @@ class MtaReceiverService : Service() {
     private var advertiser: android.bluetooth.le.BluetoothLeAdvertiser? = null
     private val receivers = mutableListOf<BroadcastReceiver>()
 
+    /** 本次接收落盘的文件名与总字节数(收完推给 UI 做提示 + 列表刷新)。 */
+    private val receivedNames = java.util.Collections.synchronizedList(ArrayList<String>())
+    private var receivedBytes = 0L
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -91,35 +109,43 @@ class MtaReceiverService : Service() {
         nm.createNotificationChannel(
             NotificationChannel(CH, "互传传输", NotificationManager.IMPORTANCE_LOW),
         )
-        startForeground(FG_ID, notification("互传接收已开启 · 等待附近的设备"))
-
-        val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager
-        val adapter = btManager.adapter
-        if (adapter == null || adapter.bluetoothLeAdvertiser == null) {
-            Log.w(TAG, "BLE advertising 不可用,接收关闭")
+        try {
+            startForeground(FG_ID, notification("互传接收已开启 · 等待附近的设备"))
+        } catch (e: Throwable) {
+            Log.e(TAG, "startForeground 失败,接收关闭", e)
             stopSelf()
             return
         }
-        advertiser = adapter.bluetoothLeAdvertiser
-        gattCallback = GattServerCallback()
-        gattServer = btManager.openGattServer(this, gattCallback)
-        gattServer?.addService(gattCallback!!.buildService())
-        startAdvertising()
+
+        // 运行时权限缺一个这里就会抛 SecurityException(前台服务启动即崩),先自检。
+        val missing = missingBlePermissions(this)
+        if (missing.isNotEmpty()) {
+            Log.w(TAG, "缺少互传所需权限:${missing.joinToString { it.substringAfterLast('.') }},接收关闭")
+            stopSelf()
+            return
+        }
+
+        try {
+            val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager
+            val adapter = btManager.adapter
+            if (adapter == null || adapter.bluetoothLeAdvertiser == null) {
+                Log.w(TAG, "BLE advertising 不可用,接收关闭")
+                stopSelf()
+                return
+            }
+            advertiser = adapter.bluetoothLeAdvertiser
+            gattCallback = GattServerCallback()
+            gattServer = btManager.openGattServer(this, gattCallback)
+            gattServer?.addService(gattCallback!!.buildService())
+            startAdvertising()
+        } catch (e: SecurityException) {
+            Log.e(TAG, "缺少蓝牙权限,接收关闭", e)
+            stopSelf()
+            return
+        }
 
         p2pManager = getSystemService(WifiP2pManager::class.java) as WifiP2pManager
         p2pChannel = p2pManager.initialize(this, mainLooper, null)
-
-        // P2P 连接结果 → LinkBus
-        val p2pRx: BroadcastReceiver = object : BroadcastReceiver() {
-            override fun onReceive(c: Context?, i: Intent?) {
-                if (i?.action != WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION) return
-                @Suppress("DEPRECATION")
-                val info = i.getParcelableExtra<WifiP2pInfo>(WifiP2pManager.EXTRA_WIFI_P2P_INFO)
-                if (info != null && info.groupFormed) MtaLinkBus.feedP2p(info)
-            }
-        }
-        registerReceiver(p2pRx, IntentFilter(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION), Context.RECEIVER_NOT_EXPORTED)
-        receivers.add(p2pRx)
 
         // 接受/拒绝(通知按钮经 startService 走 EXTRA_ACCEPT;此处兜底广播)
         val answerRx: BroadcastReceiver = object : BroadcastReceiver() {
@@ -160,6 +186,8 @@ class MtaReceiverService : Service() {
         }
         scope.launch {
             var err: String? = null
+            receivedNames.clear()
+            receivedBytes = 0L
             try {
                 runReceive(p2pInfo)
             } catch (e: Throwable) {
@@ -168,6 +196,15 @@ class MtaReceiverService : Service() {
             } finally {
                 MtaState.unlock()
                 notify(PROGRESS_ID, "互传接收" + (if (err == null) "完成" else "失败:$err"))
+                if (err == null && receivedNames.isNotEmpty()) {
+                    MtaUiBridge.emitReceived(
+                        MtaUiBridge.Received(
+                            fileName = receivedNames.last(),
+                            count = receivedNames.size,
+                            totalSize = receivedBytes,
+                        ),
+                    )
+                }
                 startAdvertising() // 继续可被发现
             }
         }
@@ -190,9 +227,11 @@ class MtaReceiverService : Service() {
             val idBytes = MtaConst.SENDER_ID.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
             val advData = AdvertiseData.Builder().apply {
                 addServiceUuid(android.os.ParcelUuid(MtaConst.ADV_SERVICE_UUID))
+                // 数据只带 2 字节 senderId + 4 字节 0——5G 支持位与品牌位是「UUID 自身」的
+                // 第 2/3 字节(见 MtaConst.ADV_DATA_5G_BRAND_UUID),不在数据里;上游同样补 0。
                 addServiceData(
                     android.os.ParcelUuid(MtaConst.ADV_DATA_5G_BRAND_UUID),
-                    byteArrayOf(idBytes[0], idBytes[1], 0x01, 0xff.toByte(), 0x00, 0x00),
+                    byteArrayOf(idBytes[0], idBytes[1], 0x00, 0x00, 0x00, 0x00),
                 )
                 setIncludeTxPowerLevel(false)
                 setIncludeDeviceName(false)
@@ -324,7 +363,7 @@ class MtaReceiverService : Service() {
                 state = 0,
                 key = MtaSecurity.getEncodedPublicKey(),
                 mac = MtaState.mac(this@MtaReceiverService),
-                catShare = null,
+                catShare = MtaConst.CAT_SHARE_VERSION,
             ).toJsonBytes()
             val from = offset.coerceAtMost(bytes.size)
             gattServer?.sendResponse(
@@ -391,6 +430,8 @@ class MtaReceiverService : Service() {
                 Log.e(TAG, "P2pInfo 解析失败", e)
                 return
             }
+            // 原文留档:用来对齐各家(小米/一加)真正发过来的字段集合
+            Log.i(TAG, "收到 P2pInfo 原文=${String(payload, Charsets.UTF_8)}")
             Log.i(TAG, "收到 P2pInfo ssid=${plain.ssid} port=${plain.port}")
             startService(
                 Intent(this@MtaReceiverService, MtaReceiverService::class.java)
@@ -411,8 +452,9 @@ class MtaReceiverService : Service() {
                 if (i?.action != WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION) return
                 @Suppress("DEPRECATION")
                 val info = i.getParcelableExtra<WifiP2pInfo>(WifiP2pManager.EXTRA_WIFI_P2P_INFO)
-                if (info != null && info.groupFormed) MtaLinkBus.feedP2p(info)
-                if (info != null && info.groupFormed) linkDeferred.complete(info)
+                // 只有「组成组 + 自己不是 GO」才算入组成功:否则可能是残留组的广播,
+                // 或本机被选成 GO(对端才是 GO,连接注定失败)。
+                if (info != null && info.groupFormed && !info.isGroupOwner) linkDeferred.complete(info)
             }
         }.also {
             registerReceiver(it, IntentFilter(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION), Context.RECEIVER_NOT_EXPORTED)
@@ -446,20 +488,34 @@ class MtaReceiverService : Service() {
 
             val ws = client.webSocketSession("wss://$hostPort${MtaConst.WSS_PATH}")
 
-            var sendRequestPayload: JSONObject? = null
+            val sendRequestFuture = CompletableDeferred<JSONObject>()
             var transferOkLocal = false
 
+            // 注意:OPPO/一加 这类实现在「开始供文件」时就会把控制面 WS 关掉,
+            // 而数据面走的是独立的 HTTPS /download。WS 的 EOF 不能当成致命错误,
+            // 否则 launch 里的异常会取消父 scope,把正在进行的下载一起杀掉。
             val readerJob = launch {
-                ws.incoming.consumeEach { frame ->
+                try {
+                    ws.incoming.consumeEach { frame ->
                     val text = (frame as? io.ktor.websocket.Frame.Text)?.readText() ?: return@consumeEach
+                    Log.i(TAG, "WS in: $text")
                     val msg = MtaWsMessage.fromText(text) ?: return@consumeEach
                     when (msg.type) {
                         "action" -> when (msg.name.lowercase()) {
-                            "versionnegotiation" -> ws.send(Frame.Text(MtaWsMessage("ack", msg.id, msg.name, JSONObject().put("version", 1).put("threadLimit", 5)).toText()))
+                            "versionnegotiation" -> {
+                                val ack = MtaWsMessage(
+                                    "ack", msg.id, msg.name,
+                                    JSONObject().put("version", 1).put("threadLimit", 5),
+                                ).toText()
+                                Log.i(TAG, "WS out: $ack")
+                                ws.send(Frame.Text(ack))
+                            }
 
                             "sendrequest" -> {
-                                ws.send(Frame.Text(MtaWsMessage("ack", msg.id, msg.name).toText()))
-                                sendRequestPayload = msg.payload
+                                val ack = MtaWsMessage("ack", msg.id, msg.name).toText()
+                                Log.i(TAG, "WS out: $ack")
+                                ws.send(Frame.Text(ack))
+                                msg.payload?.let { sendRequestFuture.complete(it) }
                             }
 
                             else -> Unit
@@ -467,13 +523,15 @@ class MtaReceiverService : Service() {
 
                         else -> Unit
                     }
+                    }
+                } catch (e: Throwable) {
+                    // 对端关 WS 属于正常收尾(数据面走独立 HTTPS /download),不能往外抛
+                    Log.w(TAG, "WS 读取结束:${e.javaClass.simpleName} ${e.message}")
                 }
             }
 
-            val payload = withTimeoutOrNull(5_000) {
-                while (sendRequestPayload == null) delay(100)
-                sendRequestPayload!!
-            } ?: throw RuntimeException("等待发送请求超时")
+            val payload = withTimeoutOrNull(10_000) { sendRequestFuture.await() }
+                ?: throw RuntimeException("等待发送请求超时")
 
             val taskIdStr = payload.optString("taskId", payload.optString("id", "0"))
             val senderName = payload.optString("senderName", "设备")
@@ -484,6 +542,7 @@ class MtaReceiverService : Service() {
             // 用户确认:前台=应用内确认面板(20s),后台=通知(10s);超时=拒绝
             MtaLinkBus.userAccept = null
             val usePanel = MtaState.appInForeground && MtaUiBridge.panelEmitter != null
+            Log.i(TAG, "需要用户确认:usePanel=$usePanel fg=${MtaState.appInForeground} emitter=${MtaUiBridge.panelEmitter != null}")
             var answer: Boolean? = null
             if (usePanel) {
                 val accepted = CompletableDeferred<Boolean>()
@@ -510,7 +569,9 @@ class MtaReceiverService : Service() {
             }
             nm.cancel(ASK_ID)
             if (answer != true) {
-                ws.send(Frame.Text(MtaWsMessage.status(taskIdStr.toIntOrNull() ?: 0, 3, "user refuse").toText()))
+                runCatching {
+                    ws.send(Frame.Text(MtaWsMessage.status(taskIdStr, 3, "user refuse").toText()))
+                }
                 throw RuntimeException("用户拒绝接收")
             }
             nm.notify(PROGRESS_ID, notification("正在接收:$fileName"))
@@ -531,8 +592,10 @@ class MtaReceiverService : Service() {
                     var lastUpd = 0L
                     while (true) {
                         val entry = zis.nextEntry ?: break
-                        saveToMediaStore(zis, entry)
-                        processed += entry.size.coerceAtLeast(0)
+                        val written = saveToMediaStore(zis, entry)
+                        receivedNames.add(java.io.File(entry.name).name)
+                        receivedBytes += written
+                        processed += written
                         zis.closeEntry()
                         val now = System.currentTimeMillis()
                         if (now - lastUpd > 1_000) {
@@ -543,7 +606,7 @@ class MtaReceiverService : Service() {
                 }
             }
 
-            ws.send(Frame.Text(MtaWsMessage.status(taskIdStr.toIntOrNull() ?: 0, 1, "ok").toText()))
+            runCatching { ws.send(Frame.Text(MtaWsMessage.status(taskIdStr, 1, "ok").toText())) }
             transferOkLocal = true
             delay(1_000)
             readerJob.cancel()
@@ -560,7 +623,7 @@ class MtaReceiverService : Service() {
         if (!transferOk) throw RuntimeException("传输未完成")
     }
 
-    private fun saveToMediaStore(input: java.io.InputStream, entry: java.util.zip.ZipEntry) {
+    private fun saveToMediaStore(input: java.io.InputStream, entry: java.util.zip.ZipEntry): Long {
         val name = java.io.File(entry.name).name.ifEmpty { "file_${System.currentTimeMillis()}" }
         val ext = name.substringAfterLast('.', "")
         val mime = android.webkit.MimeTypeMap.getSingleton()
@@ -577,11 +640,14 @@ class MtaReceiverService : Service() {
             resolver.openOutputStream(uri)?.use { out ->
                 BufferedOutputStream(out).use { bos ->
                     val buf = ByteArray(1024 * 1024 * 4)
+                    var total = 0L
                     while (true) {
                         val n = input.read(buf)
                         if (n == -1) break
                         bos.write(buf, 0, n)
+                        total += n
                     }
+                    return total
                 }
             } ?: throw RuntimeException("MediaStore 输出流打开失败")
         } else {
@@ -595,11 +661,14 @@ class MtaReceiverService : Service() {
             out.use { fos ->
                 BufferedOutputStream(fos).use { bos ->
                     val buf = ByteArray(1024 * 1024 * 4)
+                    var total = 0L
                     while (true) {
                         val n = input.read(buf)
                         if (n == -1) break
                         bos.write(buf, 0, n)
+                        total += n
                     }
+                    return total
                 }
             }
         }
@@ -609,12 +678,6 @@ class MtaReceiverService : Service() {
     object MtaLinkBus {
         @Volatile
         var userAccept: Boolean? = null
-
-        private val p2p = AtomicReference<CompletableDeferred<WifiP2pInfo>?>(null)
-
-        fun feedP2p(info: WifiP2pInfo) {
-            p2p.get()?.complete(info)
-        }
 
         fun freshAccept() {
             userAccept = null

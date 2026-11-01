@@ -18,7 +18,20 @@ object MtaUiBridge {
         val answer: (accept: Boolean) -> Unit,
     )
 
+    /** 一次接收完成(用于应用内轻提示 + 文件列表刷新)。 */
+    data class Received(val fileName: String, val count: Int, val totalSize: Long)
+
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** 接收完成 → UI(主线程)。没有监听者时静默丢弃。 */
+    @Volatile
+    var receivedEmitter: ((Received) -> Unit)? = null
+
+    fun emitReceived(info: Received) {
+        val sink = receivedEmitter ?: return
+        mainHandler.post { sink.invoke(info) }
+    }
+
 
     @Volatile
     var panelEmitter: ((IncomingRequest) -> Unit)? = null

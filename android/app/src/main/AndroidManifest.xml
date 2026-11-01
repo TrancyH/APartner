@@ -14,6 +14,10 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 11 及以下:Ble 扫描/广播/GATT 走这两条(安装时授权)。缺了在 API 26~30 上
+         直接 SecurityException——BLUETOOTH_SCAN 等是 API 31 才存在的权限,不能替代它们。 -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation"
         tools:ignore="ProtectedPermissions" />
@@ -39,6 +43,8 @@
 
     <!-- 电话硬件非必需:短信/来电功能在无电话硬件设备(平板/ChromeOS)上自动降级,避免市场误判不兼容 -->
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
+    <!-- WiFi Direct 不是所有设备都有;没有就只降级互传,不影响其他支柱 -->
+    <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
 
     <application
         android:label="APartner"
@@ -56,15 +62,17 @@
             </intent-filter>
         </activity>
 
-        <!-- MTA 互传联盟:发送 / 接收 -->
+        <!-- MTA 互传联盟:发送 / 接收。
+             type 用 connectedDevice 而不是 dataSync:①语义正确(BLE/WiFi P2P);
+             ②Android 15+ 对 dataSync 前台服务有 6 小时/24h 上限,常驻的接收服务会被系统掐掉。 -->
         <service
             android:name=".mta.MtaSenderService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="connectedDevice" />
         <service
             android:name=".mta.MtaReceiverService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="connectedDevice" />
 
         <!-- 第三方应用分享文件通道(零依赖 FileProvider 替代) -->
         <provider

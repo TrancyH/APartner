@@ -47,7 +47,11 @@ dependencies {
     implementation("io.ktor:ktor-client-okhttp:$ktor")
     implementation("io.ktor:ktor-client-websockets:$ktor")
     implementation("io.ktor:ktor-server-core:$ktor")
+    // 强制较新的 Netty:ktor 3.0.3 默认带的 4.1.116 在 Android 上会把客户端的 ALPN
+    // 选择误判为不支持,直接抛 AssertionError,导致一加/OPPO 的 WSS 握手失败。
+    implementation(platform("io.netty:netty-bom:4.1.118.Final"))
     implementation("io.ktor:ktor-server-netty:$ktor")
+    // 注:曾试过 ktor-server-cio(不做 ALPN),但 CIO 引擎不支持服务端 HTTPS,不可用。
     implementation("io.ktor:ktor-server-websockets:$ktor")
     implementation("io.ktor:ktor-network-tls-certificates:$ktor")
 }

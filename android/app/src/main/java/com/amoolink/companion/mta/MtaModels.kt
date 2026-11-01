@@ -36,6 +36,12 @@ data class MtaP2pInfo(
     val port: Int,
     val key: String? = null,
     val catShare: Int? = null,
+    /**
+     * P2P 组的工作频率(如 5220 / 2412)。
+     * 实测:一加(OPPO OShare)写过来的 P2pInfo 一定带 freq,而我们原来不发——
+     * 对端拿不到组频率就无法入组(会停在 saveP2pAddress + P2P 搜索那一步)。
+     */
+    val freq: Int? = null,
 ) {
     fun toJsonBytes(): ByteArray = JSONObject()
         .apply {
@@ -43,6 +49,7 @@ data class MtaP2pInfo(
             put("ssid", ssid)
             put("psk", psk)
             put("mac", mac)
+            if (freq != null && freq > 0) put("freq", freq)
             put("port", port)
             if (key != null) put("key", key)
             if (catShare != null) put("catShare", catShare)
@@ -59,6 +66,7 @@ data class MtaP2pInfo(
             port = json.optInt("port", 0),
             key = if (json.has("key") && !json.isNull("key")) json.getString("key") else null,
             catShare = if (json.has("catShare")) json.optInt("catShare") else null,
+            freq = json.optInt("freq", 0),
         )
     }
 }
@@ -89,9 +97,13 @@ data class MtaWsMessage(
             return MtaWsMessage(m.groupValues[1], m.groupValues[2].toInt(), m.groupValues[3], payload)
         }
 
-        fun status(taskId: Int, type: Int, reason: String): MtaWsMessage = MtaWsMessage(
+        /**
+         * 状态回执。taskId 必须原样回传(发送方的 taskId 可能是长数字串,压成 Int 会变 0,
+         * 对端就认不出是哪一次传输);上游 CatShare 的 makeStatus 也同时带 taskId 与 id。
+         */
+        fun status(taskId: String, type: Int, reason: String): MtaWsMessage = MtaWsMessage(
             "action", STATUS_ID, "status",
-            JSONObject().put("taskId", taskId).put("type", type).put("reason", reason),
+            JSONObject().put("taskId", taskId).put("id", taskId).put("type", type).put("reason", reason),
         )
 
         /** status 消息在协议中的 id 固定 99。 */
