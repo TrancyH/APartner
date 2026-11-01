@@ -143,6 +143,9 @@ class ConnectionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onDestroy() {
+        // 之前只 acquire 不 release:服务停了锁还挂在系统上,一直白耗电。
+        runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
+        wakeLock = null
         instance = null
         serverThread?.interrupt()
         for (conn in sessions.values) conn.close()
