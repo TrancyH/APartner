@@ -1,12 +1,18 @@
 package com.amoolink.companion
 
 import android.app.Activity
+import com.amoolink.companion.mta.MtaConst
+import com.amoolink.companion.mta.MtaSenderService
 import android.app.AlertDialog
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.Typeface
 import android.text.TextWatcher
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
@@ -240,6 +246,10 @@ class FilesPage(private val act: Activity) {
     /** @return true = 已消费(返回键不退出页面)。 */
     fun onBackPressed(): Boolean {
         return when {
+            sheetOverlay != null -> {
+                dismissSheet()
+                true
+            }
             selectionMode -> {
                 exitSelection()
                 true
@@ -440,8 +450,8 @@ class FilesPage(private val act: Activity) {
             applyFilter()
             return
         }
-        // 单击文件/分类页条目 → 弹出分享列表(选择发送到的电脑)
-        showShareDialog(listOf(item))
+        // 单击文件/分类页条目 → 底部滑出分享面板
+        showShareSheet(listOf(item))
     }
 
     private fun onRowLongPress(item: FileStore.Item) {
@@ -484,118 +494,435 @@ class FilesPage(private val act: Activity) {
     private fun shareSelected() {
         val sel = selectedItems()
         if (sel.isEmpty()) return
-        val svc = ConnectionService.instance
-        if (svc == null || !svc.hasConnectedDesktop()) {
-            toast("未连接电脑——请先在首页配对并连接")
-            return
-        }
-        exitSelection()
-        showShareDialog(sel)
+        showShareSheet(sel)
     }
 
-    /** 分享列表:列出已连接电脑,点击即发送(含文件夹时自动打包 ZIP)。 */
-    private fun showShareDialog(items: List<FileStore.Item>) {
+    // ── 底部滑出分享面板(参考厂商文件管理「打开方式」面板)──────────
+
+    private var sheetOverlay: FrameLayout? = null
+
+    private class MtaFound(
+        val device: android.bluetooth.BluetoothDevice,
+        val id: String,
+        val name: String,
+        val supports5G: Boolean,
+    )
+
+    private var mtaScanCallback: android.bluetooth.le.ScanCallback? = null
+    private val mtaFound = LinkedHashMap<String, MtaFound>()
+
+    private fun topRoundedPanel(): android.graphics.drawable.GradientDrawable =
+        android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            val r = dp(22).toFloat()
+            cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+            setColor(Ui.SURFACE)
+        }
+
+    private fun dismissSheet() {
+        val overlay = sheetOverlay ?: return
+        sheetOverlay = null
+        stopMtaScan()
+        val panel = overlay.getChildAt(1)
+        val scrim = overlay.getChildAt(0)
+        panel.animate().translationY(panel.height.toFloat()).setDuration(220)
+            .withEndAction { (overlay.parent as? ViewGroup)?.removeView(overlay) }
+            .start()
+        scrim.animate().alpha(0f).setDuration(220).start()
+    }
+
+    private fun showShareSheet(items: List<FileStore.Item>) {
+        if (sheetOverlay != null) return
+        val content = act.findViewById<ViewGroup>(android.R.id.content)
+
+        val scrim = View(act).apply { setBackgroundColor(0x99000000.toInt()); alpha = 0f }
+        scrim.setOnClickListener { dismissSheet() }
+
+        val panel = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            background = topRoundedPanel()
+            setPadding(dp(16), dp(10), dp(16), dp(14))
+        }
+
+        // 把手
+        panel.addView(
+            View(act).apply { background = Ui.pill(act, Ui.TEXT_3) },
+            LinearLayout.LayoutParams(dp(36), dp(4)).apply { gravity = Gravity.CENTER_HORIZONTAL },
+        )
+
+        // 文件头卡片
+        val head = LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(12), 0, dp(4))
+        }
+        val first = items.first()
+        val headTile = TextView(act).apply {
+            gravity = Gravity.CENTER
+            textSize = 20f
+        }
+        headTile.background = Ui.tile(act, first.tileColor)
+        head.addView(headTile, LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginEnd = dp(12) })
+        val headCol = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+        headCol.addView(Ui.text(act, if (items.size == 1) first.name else "已选 ${items.size} 项", 16, Ui.TEXT, Ui.TITLE))
+        headCol.addView(
+            Ui.text(
+                act,
+                if (items.size == 1) "${first.sizeText} · ${first.timeText}" else "共 ${items.sumOf { it.size } / 1024} KB",
+                12,
+                Ui.TEXT_3,
+            ),
+        )
+        head.addView(headCol, LinearLayout.LayoutParams(0, ViewGroupHelpers.wrap(), 1f))
+        if (items.size == 1 && !first.dir && FileStore.isImage(first.name)) {
+            headTile.visibility = View.INVISIBLE
+            FileStore.requestThumb(first.path, 128) { bmp ->
+                act.runOnUiThread {
+                    if (bmp != null) {
+                        headTile.text = ""
+                        headTile.background = android.graphics.drawable.BitmapDrawable(act.resources, bmp)
+                        headTile.visibility = View.VISIBLE
+                    } else {
+                        headTile.text = first.icon
+                        headTile.visibility = View.VISIBLE
+                    }
+                }
+            }
+        }
+        panel.addView(head, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        val bodyScroll = android.widget.ScrollView(act).apply { setBackgroundColor(Color.TRANSPARENT) }
+        val body = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+        bodyScroll.addView(body)
+        panel.addView(
+            bodyScroll,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
+            ).apply { topMargin = dp(6) },
+        )
+
+        val overlay = FrameLayout(act)
+        overlay.addView(scrim, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        overlay.addView(
+            panel,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM),
+        )
+        content.addView(overlay, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        sheetOverlay = overlay
+        overlay.isFocusableInTouchMode = true
+        overlay.requestFocus()
+        overlay.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_BACK && event.action == android.view.KeyEvent.ACTION_UP) {
+                dismissSheet()
+                true
+            } else {
+                false
+            }
+        }
+
+        // 滑入动画
+        panel.post {
+            panel.translationY = panel.height.toFloat()
+            panel.animate().translationY(0f).setDuration(260)
+                .setInterpolator(android.view.animation.DecelerateInterpolator()).start()
+        }
+        scrim.animate().alpha(1f).setDuration(200).start()
+
+        fillShareSections(body, items)
+    }
+
+    private fun sheetSection(body: LinearLayout, title: String): LinearLayout {
+        body.addView(
+            Ui.text(act, title, 11, Ui.TEXT_3, Ui.TITLE).apply {
+                setPadding(dp(12), dp(10), dp(12), dp(2)); letterSpacing = 0.06f
+            },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+        val slot = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+        body.addView(slot, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        return slot
+    }
+
+    private fun sheetRow(glyph: String, glyphBg: Int?, title: String, sub: String, onClick: (() -> Unit)?): LinearLayout {
+        val row = LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            if (onClick != null) {
+                background = Ui.ripple(act, Ui.card(act, Color.TRANSPARENT, 12, strokeWidth = 0))
+                setOnClickListener { onClick() }
+            }
+        }
+        val tile = TextView(act).apply {
+            gravity = Gravity.CENTER
+            textSize = 15f
+            text = glyph
+            if (glyphBg != null) background = Ui.tile(act, glyphBg)
+        }
+        row.addView(tile, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(12) })
+        val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(Ui.text(act, title, 14, if (onClick != null) Ui.TEXT else Ui.TEXT_3))
+        col.addView(Ui.text(act, sub, 11, Ui.TEXT_3))
+        row.addView(col, LinearLayout.LayoutParams(0, ViewGroupHelpers.wrap(), 1f).apply { marginStart = dp(4) })
+        row.addView(Ui.text(act, "›", 14, Ui.TEXT_3))
+        return row
+    }
+
+    private fun TextView.tileText(g: String): TextView {
+        text = g
+        return this
+    }
+
+    private fun fillShareSections(body: LinearLayout, items: List<FileStore.Item>) {
         val svc = ConnectionService.instance
         val conns = svc?.connectedDesktops() ?: emptyList()
-        var dlg: AlertDialog? = null
-        val box = LinearLayout(act).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(6), dp(4), dp(6), dp(4))
-        }
-        if (conns.isEmpty() || svc == null) {
-            box.addView(
-                Ui.text(act, "没有已连接的电脑\n请在首页配对并连接后再分享", 13, Ui.TEXT_3).apply {
-                    gravity = Gravity.CENTER
-                    setPadding(dp(16), dp(12), dp(16), dp(16))
-                },
-            )
+
+        // 1. 发送到电脑
+        val pcSlot = sheetSection(body, "发送到电脑")
+        if (conns.isEmpty()) {
+            pcSlot.addView(Ui.text(act, "未连接电脑——请在首页配对并连接", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) })
         } else {
-            box.addView(
-                Ui.text(act, "发送到电脑", 11, Ui.TEXT_3).apply { setPadding(dp(12), dp(4), dp(12), dp(4)) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
-            )
             for (fp in conns) {
-                val row = LinearLayout(act).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(12), dp(12), dp(12), dp(12))
-                    background = Ui.ripple(act, Ui.card(act, Color.TRANSPARENT, 10, strokeWidth = 0))
-                }
-                row.addView(Ui.text(act, "💻", 16, Ui.TEXT), LinearLayout.LayoutParams(dp(32), ViewGroupHelpers.wrap()))
-                val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
-                val desktopName: String = svc.pinnedName(fp)
-                col.addView(Ui.text(act, desktopName, 14, Ui.TEXT, Ui.TITLE))
-                col.addView(Ui.text(act, "在线 · 点击发送", 11, Ui.OK))
-                row.addView(col, LinearLayout.LayoutParams(0, ViewGroupHelpers.wrap(), 1f))
-                row.addView(Ui.text(act, "›", 14, Ui.TEXT_3))
-                row.setOnClickListener {
-                    dlg?.dismiss()
+                val row = sheetRow("💻", null, svc?.pinnedName(fp) ?: fp, "在线 · 点击发送") {
                     exitSelection()
                     startPush(items, fp)
+                    dismissSheet()
                 }
-                box.addView(row)
-            }
-
-            // 手机分区:其他安装了 APartner 的手机,经桌面中继接收
-            val conn = svc.firstDesktopConn()
-            if (conn != null) {
-                box.addView(
-                    Ui.text(act, "发送到手机(APartner)", 11, Ui.TEXT_3)
-                        .apply { setPadding(dp(12), dp(10), dp(12), dp(4)) },
-                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
-                )
-                val phoneSlot = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
-                val loading = Ui.text(act, "正在获取附近手机…", 11, Ui.TEXT_3)
-                    .apply { setPadding(dp(12), dp(8), dp(12), dp(8)) }
-                phoneSlot.addView(loading)
-                box.addView(phoneSlot)
-                Thread {
-                    val phones = try {
-                        DesktopRpc.phonesList(conn)
-                    } catch (e: Exception) {
-                        emptyList()
-                    }
-                    act.runOnUiThread {
-                        if (dlg?.isShowing != true) return@runOnUiThread
-                        phoneSlot.removeAllViews()
-                        if (phones.isEmpty()) {
-                            phoneSlot.addView(
-                                Ui.text(act, "附近没有其他安装了 APartner 的手机", 12, Ui.TEXT_3)
-                                    .apply { setPadding(dp(12), dp(8), dp(12), dp(8)) },
-                            )
-                            return@runOnUiThread
-                        }
-                        for (p in phones) {
-                            val prow = LinearLayout(act).apply {
-                                orientation = LinearLayout.HORIZONTAL
-                                gravity = Gravity.CENTER_VERTICAL
-                                setPadding(dp(12), dp(12), dp(12), dp(12))
-                                background = Ui.ripple(act, Ui.card(act, Color.TRANSPARENT, 10, strokeWidth = 0))
-                            }
-                            prow.addView(Ui.text(act, "📱", 16, Ui.TEXT), LinearLayout.LayoutParams(dp(32), ViewGroupHelpers.wrap()))
-                            val pcol = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
-                            pcol.addView(Ui.text(act, p.name, 14, Ui.TEXT, Ui.TITLE))
-                            pcol.addView(Ui.text(act, "在线 · 经电脑中继接收", 11, Ui.OK))
-                            prow.addView(pcol, LinearLayout.LayoutParams(0, ViewGroupHelpers.wrap(), 1f))
-                            prow.addView(Ui.text(act, "›", 14, Ui.TEXT_3))
-                            prow.setOnClickListener {
-                                dlg?.dismiss()
-                                exitSelection()
-                                startRelay(items, p)
-                            }
-                            phoneSlot.addView(prow)
-                        }
-                    }
-                }.start()
+                pcSlot.addView(row)
             }
         }
-        val scroll = android.widget.ScrollView(act)
-        scroll.addView(box)
-        dlg = AlertDialog.Builder(act)
-            .setTitle(if (items.size == 1) "分享「${items[0].name}」" else "分享 ${items.size} 项")
-            .setView(scroll)
-            .setNegativeButton("取消", null)
-            .show()
+
+        // 2. 发送到手机(APartner)
+        val phoneSlot = sheetSection(body, "发送到手机(APartner)")
+        val phoneLoading = Ui.text(act, "正在获取…", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) }
+        phoneSlot.addView(phoneLoading)
+        val conn = svc?.firstDesktopConn()
+        if (conn != null) {
+            Thread {
+                val phones = try {
+                    DesktopRpc.phonesList(conn)
+                } catch (e: Exception) {
+                    emptyList()
+                }
+                act.runOnUiThread {
+                    if (sheetOverlay == null) return@runOnUiThread
+                    phoneSlot.removeAllViews()
+                    if (phones.isEmpty()) {
+                        phoneSlot.addView(
+                            Ui.text(act, "附近没有其他安装了 APartner 的手机", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) },
+                        )
+                        return@runOnUiThread
+                    }
+                    for (p in phones) {
+                        phoneSlot.addView(
+                            sheetRow("📱", null, p.name, "在线 · 经电脑中继接收") {
+                                exitSelection()
+                                startRelay(items, p)
+                                dismissSheet()
+                            },
+                        )
+                    }
+                }
+            }.start()
+        } else {
+            phoneSlot.addView(Ui.text(act, "电脑未连接,无法发现其他手机", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) })
+        }
+
+        // 3. 互传联盟设备(BLE 发现,6 秒窗口)
+        val mtaSlot = sheetSection(body, "互传联盟设备")
+        val mtaLoading = Ui.text(act, "正在扫描附近开启互传的设备…", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) }
+        mtaSlot.addView(mtaLoading)
+        startMtaScan(mtaSlot, mtaLoading, items)
+
+        // 4. 其他应用(系统 ACTION_SEND 目标)
+        val appSlot = sheetSection(body, "其他应用")
+        fillThirdPartyApps(appSlot, items)
+    }
+
+    /** 互传联盟 BLE 扫描(照搬 CatShare ShareActivity 的过滤与解析)。 */
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun startMtaScan(slot: LinearLayout, loading: TextView, items: List<FileStore.Item>) {
+        val btManager = act.getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager
+        val adapter = btManager.adapter
+        val scanner = adapter?.bluetoothLeScanner
+        if (adapter == null || !adapter.isEnabled || scanner == null) {
+            loading.text = "蓝牙未开启,无法发现互传联盟设备"
+            return
+        }
+        mtaFound.clear()
+        val filter = android.bluetooth.le.ScanFilter.Builder()
+            .setServiceUuid(android.os.ParcelUuid(MtaConst.ADV_SERVICE_UUID))
+            .build()
+        val settings = android.bluetooth.le.ScanSettings.Builder()
+            .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
+        val callback = object : android.bluetooth.le.ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: android.bluetooth.le.ScanResult) {
+                val record = result.scanRecord ?: return
+                val dataMap = record.serviceData ?: return
+                var supports5G = true
+                var hasBrand = false
+                var id = ""
+                var name = ""
+                for ((pu, d) in dataMap) {
+                    if (d.size == 6 && pu.uuid == MtaConst.ADV_DATA_5G_BRAND_UUID) {
+                        // UUID 字节大端:[2]=支持5G [3]=品牌
+                        val buf = java.nio.ByteBuffer.allocate(16)
+                        buf.putLong(pu.uuid.mostSignificantBits)
+                        buf.putLong(pu.uuid.leastSignificantBits)
+                        supports5G = buf.array()[2].toInt() == 1
+                        hasBrand = true
+                    }
+                    if (pu.uuid == MtaConst.SCAN_RESP_UUID && d.size == 27) {
+                        id = String.format("%04x", (d[8].toInt() shl 8) or d[9].toInt())
+                        var nameBytes = d.copyOfRange(10, 26)
+                        if (nameBytes[15] == '\t'.code.toByte()) nameBytes = nameBytes.copyOfRange(0, 15)
+                        name = String(nameBytes, Charsets.UTF_8).trimEnd('\u0000')
+                    }
+                }
+                if (id.isEmpty() || name.isEmpty()) return
+                mtaFound[id] = MtaFound(result.device, id, name, supports5G)
+                renderMtaRows(slot, loading, items)
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                act.runOnUiThread { loading.text = "扫描失败(err=$errorCode)" }
+            }
+        }
+        mtaScanCallback = callback
+        scanner.startScan(listOf(filter), settings, callback)
+        act.runOnUiThread {
+            if (mtaFound.isNotEmpty()) renderMtaRows(slot, loading, items)
+        }
+        // 6 秒窗口后停止扫描并落定列表
+        act.window.decorView.postDelayed({
+            stopMtaScan()
+            if (sheetOverlay != null) renderMtaRows(slot, loading, items)
+        }, 6_000)
+    }
+
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun stopMtaScan() {
+        mtaScanCallback?.let {
+            try {
+                act.getSystemService(Context.BLUETOOTH_SERVICE).let { svc ->
+                    (svc as android.bluetooth.BluetoothManager).adapter?.bluetoothLeScanner?.stopScan(it)
+                }
+            } catch (_: Exception) {
+            }
+        }
+        mtaScanCallback = null
+    }
+
+    private fun renderMtaRows(slot: LinearLayout, loading: TextView, items: List<FileStore.Item>) {
+        if (sheetOverlay == null) return
+        slot.removeAllViews()
+        if (mtaFound.isEmpty()) {
+            slot.addView(loading)
+            return
+        }
+        for (d in mtaFound.values) {
+            slot.addView(
+                sheetRow("💠", Ui.TILE_DOC, d.name, "互传联盟 · 点击直发") {
+                    val paths = items.map { it.path }
+                    val started = MtaSenderService.start(act, d.device, d.supports5G, d.name, paths)
+                    if (started) {
+                        toast("正在发送到 ${d.name}(互传联盟)")
+                        pushRow.visibility = View.VISIBLE
+                        pushText.text = "正在发送到 ${d.name}(互传联盟直连)"
+                        exitSelection()
+                        dismissSheet()
+                    } else {
+                        toast("已有传输在进行,请稍候")
+                    }
+                },
+            )
+        }
+    }
+
+    /** 其他应用:系统 ACTION_SEND 目标,四列网格(参考厂商文件管理分享面板)。 */
+    private fun fillThirdPartyApps(slot: LinearLayout, items: List<FileStore.Item>) {
+        val mime = thirdPartyMime(items)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            if (mime.isNotEmpty()) type = mime else type = "*/*"
+        }
+        val apps = act.packageManager.queryIntentActivities(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+            .filter { it.activityInfo.packageName != act.packageName }
+        if (apps.isEmpty()) {
+            slot.addView(Ui.text(act, "没有可接收的应用", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) })
+            return
+        }
+        slot.addView(
+            Ui.text(act, "用其他应用打开", 11, Ui.TEXT_3, Ui.TITLE).apply { setPadding(dp(12), dp(8), dp(12), dp(2)) },
+        )
+        var row: LinearLayout? = null
+        for ((idx, info) in apps.withIndex()) {
+            if (idx % 4 == 0) {
+                row = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
+                slot.addView(
+                    row,
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+                )
+            }
+            val cell = LinearLayout(act).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(dp(4), dp(8), dp(4), dp(8))
+                background = Ui.ripple(act, Ui.card(act, Color.TRANSPARENT, 12, strokeWidth = 0))
+                setOnClickListener {
+                    launchThirdParty(info, items, mime)
+                    dismissSheet()
+                }
+            }
+            val icon = android.widget.ImageView(act).apply {
+                setImageDrawable(info.loadIcon(act.packageManager))
+            }
+            cell.addView(
+                icon,
+                LinearLayout.LayoutParams(dp(44), dp(44)).apply { gravity = Gravity.CENTER_HORIZONTAL },
+            )
+            cell.addView(
+                Ui.text(act, info.loadLabel(act.packageManager).toString(), 11, Ui.TEXT).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    maxLines = 1
+                },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = dp(4)
+                },
+            )
+            row?.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+    }
+
+    private fun thirdPartyMime(items: List<FileStore.Item>): String {
+        if (items.isEmpty()) return "*/*"
+        if (items.size == 1 && !items[0].dir) {
+            val ext = items[0].name.substringAfterLast('.', "")
+            return android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.lowercase()) ?: "*/*"
+        }
+        return "*/*"
+    }
+
+    private fun launchThirdParty(info: android.content.pm.ResolveInfo, items: List<FileStore.Item>, mime: String) {
+        try {
+            val uris = items.map { ShareFileProvider.uriFor(it.path) }
+            val send: Intent = if (items.size == 1) {
+                Intent(Intent.ACTION_SEND).apply {
+                    type = mime
+                    putExtra(Intent.EXTRA_STREAM, uris[0])
+                }
+            } else {
+                Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                    type = mime
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+                }
+            }
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            send.setClassName(info.activityInfo.packageName, info.activityInfo.name)
+            act.startActivity(send)
+        } catch (e: Exception) {
+            toast("无法打开该应用:${e.message}")
+        }
     }
 
     /** 手机↔手机:请求桌面中继到目标手机(桌面 fs_read 源机 + fs_write 目标机)。 */

@@ -35,6 +35,19 @@ object DesktopRpc {
         return out
     }
 
+    /** 请桌面经 adb 读取本机 p2p0 MAC(MTA 认证字段);null = 不可用(需手动填)。 */
+    fun mtaMacGet(conn: FrameConn, localIps: List<String>, timeoutMs: Long = 10_000): String? {
+        val resp = sendWait(
+            conn,
+            JSONObject().put("type", "mta_mac_get").put("ips", JSONArray(localIps)),
+            "mta_mac",
+            timeoutMs,
+        )
+        return if (resp.optBoolean("ok", false)) {
+            resp.optString("mac").takeIf { it.matches(Regex("([0-9a-f]{2}:){5}[0-9a-f]{2}")) }
+        } else null
+    }
+
     /** 请求桌面把 paths 中继到目标手机;受理即回(结果经桌面 fs-updated/通知体现)。 */
     fun relay(conn: FrameConn, targetPhoneId: String, paths: List<String>, timeoutMs: Long = 15_000): JSONObject =
         sendWait(

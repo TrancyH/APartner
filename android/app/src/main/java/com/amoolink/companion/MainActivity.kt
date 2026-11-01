@@ -2,6 +2,9 @@ package com.amoolink.companion
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
+import com.amoolink.companion.mta.MtaReceiverService
+import com.amoolink.companion.mta.MtaState
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -48,6 +51,7 @@ class MainActivity : Activity() {
     private lateinit var permRights: MutableMap<String, TextView>
     private lateinit var pairedList: LinearLayout
     private lateinit var pairedEmpty: TextView
+    private lateinit var mtaMacRight: TextView
 
     // 壳:dock + 双页
     private lateinit var homeRoot: View
@@ -77,6 +81,10 @@ class MainActivity : Activity() {
         getSharedPreferences(ConnectionService.PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean("autostart", true).apply()
         startServiceExplicit()
+        // 恢复互传联盟接收开关
+        if (getSharedPreferences(MtaState.PREFS, Context.MODE_PRIVATE).getBoolean("receive_enabled", false)) {
+            MtaReceiverService.setEnabled(this, true)
+        }
     }
 
     @Deprecated("Deprecated in Java")
@@ -306,6 +314,43 @@ class MainActivity : Activity() {
         }).let { (row, right) -> permCard.addView(row); permRights["battery"] = right }
         col.addView(permCard, marginTop(8))
 
+        // 互传联盟
+        col.addView(Ui.sectionHeader(this, "互传联盟"), marginTop(22))
+        val mtaCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ui.card(this@MainActivity, Ui.SURFACE, 14)
+            setPadding(dp(10), dp(4), dp(10), dp(8))
+        }
+        val receiveRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        receiveRow.addView(
+            Ui.text(this, "互传联盟接收(原生小米/OPPO/vivo 可发送到本机)", 14, Ui.TEXT),
+            LinearLayout.LayoutParams(0, ViewGroupHelpers.wrap(), 1f),
+        )
+        val mtaSwitch = Switch(this).apply {
+            isChecked = getSharedPreferences(MtaState.PREFS, Context.MODE_PRIVATE)
+                .getBoolean("receive_enabled", false)
+        }
+        mtaSwitch.setOnCheckedChangeListener { _: CompoundButton?, checked: Boolean ->
+            getSharedPreferences(MtaState.PREFS, Context.MODE_PRIVATE).edit()
+                .putBoolean("receive_enabled", checked).apply()
+            MtaReceiverService.setEnabled(this@MainActivity, checked)
+        }
+        receiveRow.addView(mtaSwitch)
+        mtaCard.addView(receiveRow)
+        mtaCard.addView(dividerLine())
+        val macSetting = Ui.settingRow(this, "🔗", "p2p0 MAC(MTA 认证)", "", { fetchMtaMacFromDesktop() })
+        mtaMacRight = macSetting.second
+        val macSettingRow: android.view.View = macSetting.first
+        mtaCard.addView(macSettingRow)
+        mtaCard.addView(dividerLine())
+        val (manualRow, _) = Ui.settingRow(this, "✎", "手动填 p2p0 MAC", "", { showManualMacDialog() })
+        mtaCard.addView(manualRow)
+        col.addView(mtaCard, marginTop(8))
+
         // 已配对电脑
         col.addView(Ui.sectionHeader(this, "已配对电脑"), marginTop(22))
         pairedList = LinearLayout(this).apply {
@@ -381,6 +426,10 @@ class MainActivity : Activity() {
     // ── 状态渲染 ────────────────────────────────────────────────────
 
     private fun renderStatus() {
+        if (::mtaMacRight.isInitialized) {
+            val mac = MtaState.mac(this)
+            mtaMacRight.text = if (MtaState.isMacInjected(this)) "$mac ›" else "${mac.take(8)}…(占位) ›"
+        }
         val svc = ConnectionService.instance
         val conns = svc?.connectedDesktops() ?: emptyList()
         val online = conns.isNotEmpty()
@@ -480,6 +529,61 @@ class MainActivity : Activity() {
                 checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
         }
         return if (granted) "已授权 ›" else "去授权 ›"
+    }
+
+    /** 经桌面 adb 读取 p2p0 MAC 并注入(无桌面连接时引导手动)。 */
+    private fun fetchMtaMacFromDesktop() {
+        val svc = ConnectionService.instance
+        val conn = svc?.firstDesktopConn()
+        if (conn == null) {
+            toast("未连接电脑——请在首页配对连接后重试")
+            return
+        }
+        val ips = svc.localIps()
+        toast("正在请电脑读取 p2p0 MAC…")
+        Thread {
+            try {
+                val mac = DesktopRpc.mtaMacGet(conn, ips)
+                runOnUiThread {
+                    if (mac != null && MtaState.setMac(this, mac)) {
+                        toast("已注入 p2p0 MAC:$mac")
+                        renderStatus()
+                    } else {
+                        toast("电脑未能读取 MAC——可用「手动填 p2p0 MAC」兜底")
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { toast("读取失败:${e.message}(可手动填 MAC 兜底)") }
+            }
+        }.start()
+    }
+
+    private fun showManualMacDialog() {
+        val input = android.widget.EditText(this).apply {
+            hint = "aa:bb:cc:dd:ee:ff(p2p0 网卡地址)"
+            setText(MtaState.mac(applicationContext))
+            setTextColor(Ui.TEXT)
+            setHintTextColor(Ui.TEXT_3)
+            background = Ui.card(this@MainActivity, Ui.SURFACE_HIGH, 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("手动填 p2p0 MAC")
+            .setMessage("发起一次互传时,在 ROM 的开发者选项/抓包中查看 p2p0 地址后填入")
+            .setView(input)
+            .setPositiveButton("保存") { _, _ ->
+                if (MtaState.setMac(this, input.text.toString())) {
+                    toast("已保存")
+                    renderStatus()
+                } else {
+                    toast("格式不合法")
+                }
+            }
+            .setNegativeButton("清除") { _, _ ->
+                getSharedPreferences(MtaState.PREFS, Context.MODE_PRIVATE).edit().remove("mac").apply()
+                renderStatus()
+            }
+            .show()
     }
 
     private fun requestRuntimePerms() {
