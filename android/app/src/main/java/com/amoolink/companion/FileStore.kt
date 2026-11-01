@@ -28,34 +28,14 @@ object FileStore {
         val mtime: Long,
     ) {
         val icon: String
-            get() = when {
-                dir -> "📁"
-                iconFor(name) != null -> iconFor(name)!!
-                else -> "📄"
-            }
+            get() = if (dir) "📁" else iconOf(name)
 
         /** 磁块底色(暗夜链路:按类型着色,OEM 文件管理风格)。 */
         val tileColor: Int
-            get() = when {
-                dir -> Ui.TILE_OTHER
-                extOf(name) in IMAGE_EXT -> Ui.TILE_IMAGE
-                extOf(name) in VIDEO_EXT -> Ui.TILE_VIDEO
-                extOf(name) in AUDIO_EXT -> Ui.TILE_AUDIO
-                extOf(name) == "apk" -> Ui.TILE_APK
-                extOf(name) in ARCHIVE_EXT -> Ui.TILE_ARCHIVE
-                extOf(name) in DOC_EXT -> Ui.TILE_DOC
-                else -> Ui.TILE_OTHER
-            }
+            get() = if (dir) Ui.TILE_OTHER else tileColorOf(name)
 
         val sizeText: String
-            get() = when {
-                dir -> "目录"
-                size <= 0 -> "0 B"
-                size < 1024 -> "$size B"
-                size < 1024 * 1024 -> "%.1f KB".format(size / 1024.0)
-                size < 1024L * 1024 * 1024 -> "%.1f MB".format(size / 1024.0 / 1024)
-                else -> "%.2f GB".format(size / 1024.0 / 1024 / 1024)
-            }
+            get() = if (dir) "目录" else sizeTextOf(size)
 
         val timeText: String
             get() = if (mtime <= 0) "" else DATE_FMT.format(Date(mtime))
@@ -66,6 +46,29 @@ object FileStore {
     private val DOC_EXT = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "csv", "epub")
     private val ARCHIVE_EXT = setOf("zip", "rar", "7z", "tar", "gz", "bz2", "xz")
     private val VIDEO_EXT = setOf("mp4", "mkv", "mov", "avi", "webm", "3gp", "m4v")
+
+    /** 按类型取 emoji 图标(文件管理与互传确认面板共用)。 */
+    fun iconOf(name: String): String = iconFor(name) ?: "📄"
+
+    /** 按类型取磁块底色。 */
+    fun tileColorOf(name: String): Int = when {
+        extOf(name) in IMAGE_EXT -> Ui.TILE_IMAGE
+        extOf(name) in VIDEO_EXT -> Ui.TILE_VIDEO
+        extOf(name) in AUDIO_EXT -> Ui.TILE_AUDIO
+        extOf(name) == "apk" -> Ui.TILE_APK
+        extOf(name) in ARCHIVE_EXT -> Ui.TILE_ARCHIVE
+        extOf(name) in DOC_EXT -> Ui.TILE_DOC
+        else -> Ui.TILE_OTHER
+    }
+
+    /** 人类可读体积(1.0 MB 而不是 1024 KB)。 */
+    fun sizeTextOf(bytes: Long): String = when {
+        bytes <= 0 -> "0 B"
+        bytes < 1024 -> bytes.toString() + " B"
+        bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
+        bytes < 1024L * 1024 * 1024 -> "%.1f MB".format(bytes / 1024.0 / 1024)
+        else -> "%.2f GB".format(bytes / 1024.0 / 1024 / 1024)
+    }
 
     fun iconFor(name: String): String? {
         val ext = extOf(name)
@@ -79,6 +82,22 @@ object FileStore {
             else -> null
         }
     }
+
+    /**
+     * 已经是压缩格式的扩展名。这些数据再 DEFLATE 一遍几乎没有体积收益(熵已经很高),
+     * 只是白烧 CPU;直接走 NO_COMPRESSION,容器仍是标准 ZIP。
+     */
+    private val COMPRESSED_EXT = setOf(
+        "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif",
+        "mp4", "mov", "mkv", "webm", "avi", "3gp", "m4v",
+        "mp3", "aac", "m4a", "ogg", "opus", "flac", "amr", "wma",
+        "zip", "rar", "7z", "gz", "bz2", "xz", "zst", "apk", "jar", "ipa", "iso", "dmg",
+    )
+
+    /** ZIP 级别:已压缩格式直接 NO_COMPRESSION(仍走 ZIP 容器,但不做二次压缩)。 */
+    fun zipLevelFor(name: String): Int =
+        if (extOf(name) in COMPRESSED_EXT) java.util.zip.Deflater.NO_COMPRESSION
+        else java.util.zip.Deflater.DEFAULT_COMPRESSION
 
     private fun extOf(name: String): String {
         val i = name.lastIndexOf('.')
@@ -357,6 +376,7 @@ object FileStore {
     }
 
     private fun putFile(zos: java.util.zip.ZipOutputStream, f: File, entryName: String) {
+        zos.setLevel(zipLevelFor(entryName))
         java.io.BufferedInputStream(java.io.FileInputStream(f)).use { input ->
             zos.putNextEntry(java.util.zip.ZipEntry(entryName))
             input.copyTo(zos, 64 * 1024)

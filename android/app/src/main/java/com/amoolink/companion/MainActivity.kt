@@ -82,6 +82,10 @@ class MainActivity : Activity() {
         MtaUiBridge.panelEmitter = { req: MtaUiBridge.IncomingRequest ->
             showIncomingPanel(req)
         }
+        // 接收完成 → 列表刷新 + 应用内轻提示
+        MtaUiBridge.receivedEmitter = { info: MtaUiBridge.Received ->
+            onMtaReceived(info)
+        }
         // 开机自启默认开(引导页语义;关闭存 prefs)
         getSharedPreferences(ConnectionService.PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean("autostart", true).apply()
@@ -319,6 +323,9 @@ class MainActivity : Activity() {
                 toast("请到系统设置手动设置")
             }
         }).let { (row, right) -> permCard.addView(row); permRights["battery"] = right }
+        permCard.addView(dividerLine())
+        Ui.settingRow(this, "📶", "互传联盟(蓝牙 / 附近设备)", "", { requestMtaPerms() })
+            .let { (row, right) -> permCard.addView(row); permRights["mta"] = right }
         col.addView(permCard, marginTop(8))
 
         // 互传联盟
@@ -432,10 +439,44 @@ class MainActivity : Activity() {
 
     // ── 状态渲染 ────────────────────────────────────────────────────
 
+    private var macProbeStarted = false
+
+    /**
+     * 尝试从 WifiP2pManager 取本机 P2P 设备地址(= p2p0 MAC)。
+     * 应用拿不到 p2p0 的硬件地址(NetworkInterface / sysfs 都被挡),但互传联盟要求
+     * P2pInfo.mac 填真实值,否则原生接收端会以「接收端 P2P 连接超时」放弃。
+     * 这里只在占位符时探测一次,拿到就缓存进 MtaState(发起传输前还会再读一次,以当时为准)。
+     */
+    private fun probeP2pMacOnce() {
+        if (macProbeStarted) return
+        macProbeStarted = true
+        Thread {
+            try {
+                val mgr = getSystemService(android.net.wifi.p2p.WifiP2pManager::class.java)
+                val ch = mgr.initialize(this, mainLooper, null)
+                val addr = kotlinx.coroutines.runBlocking {
+                    com.amoolink.companion.mta.MtaP2p.resolveLocalMac(mgr, ch)
+                }
+                if (addr != null) {
+                    com.amoolink.companion.mta.MtaState.rememberSessionMac(addr)
+                    runOnUiThread { renderStatus() }
+                }
+            } catch (e: Throwable) {
+                android.util.Log.w("APartner", "读取 p2p0 MAC 失败:${e.message}")
+            }
+        }.start()
+    }
+
     private fun renderStatus() {
         if (::mtaMacRight.isInitialized) {
+            if (com.amoolink.companion.mta.MtaState.isMacPlaceholder(this)) probeP2pMacOnce()
             val mac = MtaState.mac(this)
-            mtaMacRight.text = if (MtaState.isMacInjected(this)) "$mac ›" else "${mac.take(8)}…(占位) ›"
+            mtaMacRight.text = if (MtaState.isMacPlaceholder(this)) {
+                // 占位 MAC 发出去,原生接收端会以「接收端 P2P 连接超时」放弃
+                "未取到(发送会失败) ›"
+            } else {
+                "$mac ›"
+            }
         }
         val svc = ConnectionService.instance
         val conns = svc?.connectedDesktops() ?: emptyList()
@@ -473,6 +514,7 @@ class MainActivity : Activity() {
         permRights["comm"]?.text = commGrantedText()
         permRights["fs"]?.text = fsGrantedText()
         permRights["battery"]?.text = "›"
+        permRights["mta"]?.text = mtaGrantedText()
 
         // 已配对电脑列表(指纹变化时重建)
         if (svc != null) {
@@ -593,6 +635,37 @@ class MainActivity : Activity() {
             .show()
     }
 
+    /**
+     * 互传联盟(BLE 发现 + GATT + WiFi P2P)缺一个运行时权限整条链路就废:
+     * - Android 12+  : BLUETOOTH_SCAN / BLUETOOTH_ADVERTISE / BLUETOOTH_CONNECT
+     * - Android 11-  : BLE 扫描依赖 ACCESS_FINE_LOCATION(本版本没有 BLUETOOTH_SCAN)
+     * - Android 13+  : NEARBY_WIFI_DEVICES(WifiP2pManager 全部调用都要它)
+     */
+    private fun missingMtaPerms(): List<String> {
+        val need = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= 31) {
+            need.add(Manifest.permission.BLUETOOTH_SCAN)
+            need.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+            need.add(Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            need.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        if (Build.VERSION.SDK_INT >= 33) need.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+        return need.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+    }
+
+    private fun mtaGrantedText(): String =
+        if (missingMtaPerms().isEmpty()) "已授权 ›" else "去授权 ›"
+
+    private fun requestMtaPerms() {
+        val missing = missingMtaPerms()
+        if (missing.isEmpty()) {
+            toast("互传权限已齐全")
+            return
+        }
+        requestPermissions(missing.toTypedArray(), 2)
+    }
+
     private fun requestRuntimePerms() {
         val perms = mutableListOf(
             Manifest.permission.READ_SMS,
@@ -637,6 +710,7 @@ class MainActivity : Activity() {
     private var incomingOverlay: FrameLayout? = null
 
     private fun showIncomingPanel(req: MtaUiBridge.IncomingRequest) {
+        android.util.Log.i("MtaPanel", "show " + req.fileName + " " + req.totalSize + "B")
         incomingOverlay?.let { (it.parent as? ViewGroup)?.removeView(it) }
         val content = findViewById<ViewGroup>(android.R.id.content)
 
@@ -647,58 +721,96 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             background = android.graphics.drawable.GradientDrawable().apply {
                 shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-                val r = dp(22).toFloat()
+                val r = dp(24).toFloat()
                 cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
                 setColor(Ui.SURFACE)
+                setStroke(dp(1), Ui.STROKE)
             }
-            setPadding(dp(20), dp(14), dp(20), dp(20))
+            setPadding(dp(18), dp(10), dp(18), dp(28))
         }
         panel.addView(
             View(this).apply { background = Ui.pill(this@MainActivity, Ui.TEXT_3) },
-            LinearLayout.LayoutParams(dp(36), dp(4)).apply { gravity = Gravity.CENTER_HORIZONTAL },
+            LinearLayout.LayoutParams(dp(32), dp(4)).apply { gravity = Gravity.CENTER_HORIZONTAL },
         )
-        panel.addView(
-            Ui.text(this, "收到互传请求", 18, Ui.TEXT, Ui.TITLE).apply {
-                setPadding(0, dp(14), 0, dp(4))
+
+        // 谁发来的:首字母头像 + 名字(不写整句,信息密度够就够)
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        head.addView(
+            Ui.text(this, req.senderName.trim().take(1).ifEmpty { "?" }.uppercase(), 17, Ui.ACCENT, Ui.TITLE).apply {
+                gravity = Gravity.CENTER
+                background = Ui.pill(this@MainActivity, Color.argb(40, 0x4F, 0xD1, 0xC5))
             },
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            LinearLayout.LayoutParams(dp(42), dp(42)),
+        )
+        val nameCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        nameCol.addView(
+            Ui.text(this, "互传请求", 11, Ui.TEXT_3, Ui.TITLE).apply { letterSpacing = 0.08f },
+        )
+        nameCol.addView(Ui.text(this, req.senderName, 19, Ui.TEXT, Ui.TITLE))
+        head.addView(
+            nameCol,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(12) },
         )
         panel.addView(
-            Ui.text(this, "${req.senderName} 要发送 ${req.fileCount} 个文件给你", 13, Ui.TEXT_2),
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            head,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(16) },
         )
+
+        // 发什么:类型磁块 + 文件名 + 体积
         val fileCard = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = Ui.card(this@MainActivity, Ui.SURFACE_HIGH, 12)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = Ui.card(this@MainActivity, Ui.SURFACE_HIGH, 14)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
         }
+        // 磁块里放扩展名(比 emoji 干净,信息量也更足)
+        val ext = req.fileName.substringAfterLast('.', "").uppercase().take(4).ifEmpty { "FILE" }
         fileCard.addView(
-            Ui.text(this, "📄", 20, Ui.TEXT).apply { gravity = Gravity.CENTER },
-            LinearLayout.LayoutParams(dp(34), dp(34)),
+            Ui.text(this, ext, if (ext.length > 3) 9 else 10, Color.WHITE, Ui.TITLE).apply {
+                gravity = Gravity.CENTER
+                letterSpacing = 0.04f
+                background = Ui.tile(this@MainActivity, FileStore.tileColorOf(req.fileName))
+            },
+            LinearLayout.LayoutParams(dp(38), dp(38)),
         )
-        val fcol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        fcol.addView(Ui.text(this, req.fileName, 14, Ui.TEXT))
-        fcol.addView(Ui.text(this, "${req.fileCount} 个文件 · ${req.totalSize / 1024} KB", 11, Ui.TEXT_3))
-        fileCard.addView(fcol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(8) })
+        val fileCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fileCol.addView(
+            Ui.text(this, req.fileName, 14, Ui.TEXT).apply {
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            },
+        )
+        fileCol.addView(
+            Ui.text(this, incomingMeta(req), 11, Ui.TEXT_3).apply { setPadding(0, dp(2), 0, 0) },
+        )
+        fileCard.addView(
+            fileCol,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(10) },
+        )
         panel.addView(
             fileCard,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(16) },
         )
 
-        val btns = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(14), 0, 0)
-        }
+        val btns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val reject = Ui.ghostButton(this, "拒绝", danger = true)
-        val accept = Ui.primaryButton(this, "接受")
-        reject.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) }
-        accept.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        val accept = Ui.primaryButton(this, "接收")
+        reject.layoutParams = LinearLayout.LayoutParams(0, dp(46), 1f).apply { marginEnd = dp(10) }
+        accept.layoutParams = LinearLayout.LayoutParams(0, dp(46), 1.5f)
         reject.setOnClickListener { answerIncoming(req, false) }
         accept.setOnClickListener { answerIncoming(req, true) }
         btns.addView(reject)
         btns.addView(accept)
-        panel.addView(btns, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        panel.addView(
+            btns,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(18) },
+        )
 
         val overlay = FrameLayout(this)
         overlay.addView(scrim, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -717,7 +829,16 @@ class MainActivity : Activity() {
         scrim.animate().alpha(1f).setDuration(180).start()
     }
 
+    /** 面板副文案:单文件给体积,多文件给"N 个文件 · 总体积"。 */
+    private fun incomingMeta(req: MtaUiBridge.IncomingRequest): String =
+        if (req.fileCount > 1) {
+            req.fileCount.toString() + " 个文件 · " + FileStore.sizeTextOf(req.totalSize)
+        } else {
+            FileStore.sizeTextOf(req.totalSize)
+        }
+
     private fun answerIncoming(req: MtaUiBridge.IncomingRequest, accept: Boolean) {
+        android.util.Log.i("MtaPanel", "answer accept=" + accept + " overlay=" + (incomingOverlay != null))
         val overlay = incomingOverlay ?: return
         incomingOverlay = null
         val panel = overlay.getChildAt(1)
@@ -726,4 +847,83 @@ class MainActivity : Activity() {
         overlay.getChildAt(0).animate().alpha(0f).setDuration(200).start()
         req.answer(accept)
     }
+
+    // ── 收到文件后的轻提示 ────────────────────────────────────────
+
+    private var receivedToast: View? = null
+
+    private fun onMtaReceived(info: MtaUiBridge.Received) {
+        if (isFinishing || isDestroyed) return
+        // 列表先刷新,提示再出来(点提示直接去文件页)
+        filesPage.onMtaReceived()
+        showReceivedToast(info)
+    }
+
+    private fun showReceivedToast(info: MtaUiBridge.Received) {
+        val content = findViewById<ViewGroup>(android.R.id.content) ?: return
+        receivedToast?.let { content.removeView(it) }
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = Ui.card(this@MainActivity, Ui.SURFACE_HIGH, 16)
+            elevation = dp(6).toFloat()
+            setPadding(dp(12), dp(10), dp(16), dp(10))
+            setOnClickListener {
+                dismissReceivedToast()
+                switchTab("files")
+            }
+        }
+        card.addView(
+            CheckView(this).apply {
+                isChecked = true
+                fillColor = Color.argb(40, 0x34, 0xD3, 0x99)
+                markColor = Ui.OK
+            },
+            LinearLayout.LayoutParams(dp(30), dp(30)),
+        )
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(Ui.text(this, "已接收", 11, Ui.TEXT_3, Ui.TITLE))
+        val what = if (info.count > 1) info.count.toString() + " 个文件" else info.fileName
+        col.addView(
+            Ui.text(this, what + " · " + FileStore.sizeTextOf(info.totalSize), 14, Ui.TEXT).apply {
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            },
+        )
+        card.addView(
+            col,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(10) },
+        )
+        val lp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP,
+        ).apply {
+            topMargin = dp(10)
+            marginStart = dp(12)
+            marginEnd = dp(12)
+        }
+        content.addView(card, lp)
+        receivedToast = card
+        card.post {
+            card.translationY = -card.height.toFloat() - dp(20)
+            card.alpha = 0f
+            card.animate().translationY(0f).alpha(1f).setDuration(220)
+                .setInterpolator(android.view.animation.DecelerateInterpolator()).start()
+        }
+        handler.postDelayed({ dismissReceivedToast() }, 3200)
+    }
+
+    private fun dismissReceivedToast() {
+        val card = receivedToast ?: return
+        receivedToast = null
+        card.animate().translationY(-card.height.toFloat() - dp(20)).alpha(0f).setDuration(180)
+            .withEndAction { (card.parent as? ViewGroup)?.removeView(card) }.start()
+    }
+
+    override fun onDestroy() {
+        MtaUiBridge.panelEmitter = null
+        MtaUiBridge.receivedEmitter = null
+        runCatching { receivedToast?.let { (it.parent as? ViewGroup)?.removeView(it) } }
+        super.onDestroy()
+    }
+
 }
