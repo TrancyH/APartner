@@ -57,6 +57,39 @@ class TestHookReceiver : BroadcastReceiver() {
             ACT_DUMP_PAIRING -> ConnectionService.instance?.dumpPairingState()
                 ?: android.util.Log.i("AmooLink", "M5STATE pairing=false service=down")
 
+            "com.amoolink.companion.ACTION_MTA_SEND" -> {
+                val path = intent.getStringExtra("path")
+                if (path.isNullOrEmpty()) {
+                    android.util.Log.w("AmooLink", "MTASEND fail: no path")
+                } else {
+                    mtaSendTest(context, path, intent.getStringExtra("name"))
+                }
+            }
+
+            "com.amoolink.companion.ACTION_MTA_PANEL" -> {
+                if (intent.getStringExtra("mode") == "received") {
+                    com.amoolink.companion.mta.MtaUiBridge.emitReceived(
+                        com.amoolink.companion.mta.MtaUiBridge.Received(
+                            intent.getStringExtra("file") ?: "1793510513941.jpg",
+                            intent.getIntExtra("count", 1),
+                            intent.getLongExtra("size", 5221435L),
+                        ),
+                    )
+                    return
+                }
+                val ok = com.amoolink.companion.mta.MtaUiBridge.emit(
+                    com.amoolink.companion.mta.MtaUiBridge.IncomingRequest(
+                        intent.getStringExtra("sender") ?: "TranzyH",
+                        intent.getStringExtra("file") ?: "1793510513941.jpg",
+                        intent.getIntExtra("count", 1),
+                        intent.getLongExtra("size", 5221435L),
+                    ) { accept ->
+                        android.util.Log.i("AmooLink", "PANEL answer=" + accept)
+                    },
+                )
+                android.util.Log.i("AmooLink", "PANEL emitted=" + ok)
+            }
+
             ACT_TEST_FS -> testFs(context)
 
             ACT_TEST_PUSH -> testPush(context)
@@ -336,6 +369,69 @@ class TestHookReceiver : BroadcastReceiver() {
                 android.util.Log.i("AmooLink", "M5FS fs ok=false err=${e.javaClass.simpleName}:${e.message}")
             } finally {
                 file?.delete()
+            }
+        }.start()
+    }
+
+    /**
+     * MTA 自测:扫 BLE 找到指定名字的互传设备,然后直接发起发送。
+     * 用法:adb shell am broadcast -a com.amoolink.companion.ACTION_MTA_SEND \
+     *        --es path /sdcard/Download/mta-test.txt --es name TranzyH
+     */
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun mtaSendTest(context: Context, path: String, name: String?) {
+        Thread {
+            try {
+                val bt = context.getSystemService(android.bluetooth.BluetoothManager::class.java).adapter
+                val scanner = bt?.bluetoothLeScanner
+                if (scanner == null) {
+                    android.util.Log.w("AmooLink", "MTASEND fail: no scanner")
+                    return@Thread
+                }
+                val latch = java.util.concurrent.CountDownLatch(1)
+                val found = java.util.concurrent.atomic.AtomicReference<android.bluetooth.BluetoothDevice>()
+                val cb = object : android.bluetooth.le.ScanCallback() {
+                    override fun onScanResult(callbackType: Int, result: android.bluetooth.le.ScanResult) {
+                        val rec = result.scanRecord
+                        // MTA 的设备名在 27 字节扫描响应的 [10..25](不是 AD 里的 deviceName)
+                        val mtaName = rec?.serviceData?.values?.firstOrNull { it.size == 27 }?.let { d ->
+                            var b = d.copyOfRange(10, 26)
+                            if (b[15] == '\t'.code.toByte()) b = b.copyOfRange(0, 15)
+                            String(b, Charsets.UTF_8).trimEnd('\u0000')
+                        }
+                        val adName = rec?.deviceName ?: result.device.name
+                        val nameHit = name == null ||
+                            (mtaName != null && (mtaName == name || mtaName.contains(name))) ||
+                            (adName != null && (adName == name || adName.contains(name)))
+                        // MTA 设备的判据:广播里有 6 字节或 27 字节的 service data,
+                        // 或者 service uuid 以 00003331 开头(名字在 27 字节里,AD 名可能为空)
+                        val mtaLike = rec?.serviceData?.values?.any { it.size == 6 || it.size == 27 } == true ||
+                            rec?.serviceUuids?.any { it.uuid.toString().startsWith("00003331") } == true
+                        if (mtaLike) android.util.Log.i("AmooLink", "MTASEND sees name=" + mtaName + " addr=" + result.device.address)
+                        val hit = nameHit || mtaLike
+                        if (hit && found.compareAndSet(null, result.device)) latch.countDown()
+                    }
+                }
+                // 不加过滤:各家 MTA 实现用的 base UUID 不完全一致(0x3331 标准 base /
+                // 008123456789),按名字挑设备最稳。
+                scanner.startScan(
+                    null,
+                    android.bluetooth.le.ScanSettings.Builder()
+                        .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY).build(),
+                    cb,
+                )
+                val ok = latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
+                runCatching { scanner.stopScan(cb) }
+                val dev = found.get()
+                android.util.Log.i("AmooLink", "MTASEND found=" + (dev?.address ?: "null") + " ok=" + ok)
+                if (dev != null) {
+                    val started = com.amoolink.companion.mta.MtaSenderService.start(
+                        context, dev, true, name ?: dev.address, listOf(path),
+                    )
+                    android.util.Log.i("AmooLink", "MTASEND started=" + started)
+                }
+            } catch (e: Throwable) {
+                android.util.Log.w("AmooLink", "MTASEND fail: " + e.message)
             }
         }.start()
     }

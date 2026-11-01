@@ -121,6 +121,8 @@
                 <action android:name="com.amoolink.companion.ACTION_SIGN_TEST" />
                 <action android:name="com.amoolink.companion.ACTION_DUMP_SERVER" />
                 <action android:name="com.amoolink.companion.ACTION_START_SERVICE" />
+                <action android:name="com.amoolink.companion.ACTION_MTA_SEND" />
+                <action android:name="com.amoolink.companion.ACTION_MTA_PANEL" />
             </intent-filter>
         </receiver>
     </application>
