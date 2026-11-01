@@ -39,7 +39,9 @@ class FilesPage(private val act: Activity) {
 
     companion object {
         private const val ROOT = FileStore.ROOT
-        private val TABS = listOf("最近", "图片", "视频", "音频", "文档", "安装包", "压缩包", "浏览")
+        // 标签统一两字:8 个分类等宽排一屏,长标签会互相顶到一起
+        /** 可横向滑动的分类;「浏览」固定在左边,不在这里。 */
+        private val TABS = listOf("最近", "图片", "视频", "音频", "文档", "安装", "压缩")
     }
 
     private fun dp(v: Int): Int = Ui.dp(act, v)
@@ -64,6 +66,11 @@ class FilesPage(private val act: Activity) {
     private lateinit var listView: ListView
     private lateinit var adapter: Adapter
     private val tabButtons = ArrayList<Button>()
+    private val tabMarks = ArrayList<View>()
+
+    /** 根目录下的常用目录快捷入口(只列出本机真实存在的)。 */
+    private lateinit var quickRow: HorizontalScrollView
+    private lateinit var quickWrap: LinearLayout
 
     private var tab = "最近"
     private var browsePath = ROOT
@@ -84,29 +91,44 @@ class FilesPage(private val act: Activity) {
 
     // ── 页面构建 ────────────────────────────────────────────────────
 
+    /** 顶栏用的扁平小字按钮:无胶囊无描边,给内容让位。 */
+    private fun flatTextButton(label: String): Button = Button(act).apply {
+        text = label
+        textSize = 12f
+        isSingleLine = true
+        isAllCaps = false
+        stateListAnimator = null
+        minWidth = 0
+        minimumWidth = 0
+        minHeight = 0
+        minimumHeight = 0
+        setTextColor(Ui.TEXT_2)
+        background = Ui.ripple(act, Ui.card(act, Color.TRANSPARENT, 10, strokeWidth = 0))
+        setPadding(dp(10), dp(6), dp(10), dp(6))
+    }
+
     fun build(): View {
         val match = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
 
         val root = LinearLayout(act).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Ui.BG)
-            setPadding(dp(14), dp(16), dp(14), 0)
+            setPadding(dp(14), dp(10), dp(14), 0)
         }
 
         // 顶栏:标题 + 排序 / 粘贴 / 新建文件夹
         val top = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        titleText = Ui.text(act, "最近", 20, Ui.TEXT, Ui.TITLE)
+        titleText = Ui.text(act, "最近", 19, Ui.TEXT, Ui.TITLE)
             .apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.START }
         top.addView(titleText, LinearLayout.LayoutParams(0, ViewGroupHelpers.wrap(), 1f))
-        pasteBtn = Ui.ghostButton(act, "粘贴").apply { visibility = View.GONE }
+        pasteBtn = flatTextButton("粘贴").apply { visibility = View.GONE }
         pasteBtn.setOnClickListener { pasteClipboard() }
         top.addView(pasteBtn)
-        sortBtn = Ui.ghostButton(act, "排序").apply {
+        sortBtn = flatTextButton("排序").apply {
             setOnClickListener { showSortMenu() }
-            (top as LinearLayout).let { }
         }
         top.addView(sortBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(6) })
-        newFolderBtn = Ui.ghostButton(act, "+ 文件夹").apply { visibility = View.GONE }
+        newFolderBtn = flatTextButton("+ 文件夹").apply { visibility = View.GONE }
         newFolderBtn.setOnClickListener { onNewFolder() }
         top.addView(newFolderBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(6) })
         root.addView(top, match)
@@ -118,52 +140,66 @@ class FilesPage(private val act: Activity) {
             progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Ui.SURFACE_HIGH)
             visibility = View.GONE
         }
-        root.addView(storageBar, match.apply { topMargin = dp(8) })
-        storageText = Ui.text(act, "", 11, Ui.TEXT_3).apply { visibility = View.GONE }
+        root.addView(
+            storageBar,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(0)),
+        )
+        storageText = Ui.text(act, "", 10, Ui.TEXT_3).apply { visibility = View.GONE }
         root.addView(storageText, match)
 
-        // 分类胶囊
+        // 分类:「浏览」固定在左,其余横向滑动
+        val tabsWrap = LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        tabsWrap.addView(buildTab("浏览"))
         val scroll = HorizontalScrollView(act).apply {
             isHorizontalScrollBarEnabled = false
-            setBackgroundColor(Ui.BG)
+            setBackgroundColor(Color.TRANSPARENT)
         }
-        tabsRow = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
+        tabsRow = LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), 0, dp(4), 0)
+        }
         for (t in TABS) {
-            val b = Button(act).apply {
-                text = t
-                textSize = 13f
-                setSingleLine()
-                setAllCaps(false)
-                stateListAnimator = null
-                setPadding(dp(14), dp(4), dp(14), dp(4))
-                setTextColor(Ui.TEXT_2)
-                background = Ui.ripple(act, Ui.card(act, Ui.SURFACE, 999, Ui.STROKE, 1))
-            }
-            b.setOnClickListener { switchTab(t) }
-            tabButtons.add(b)
-            tabsRow.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                marginEnd = dp(8)
-            })
+            tabsRow.addView(
+                buildTab(t),
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    .apply { marginEnd = dp(16) },
+            )
         }
         scroll.addView(tabsRow)
-        root.addView(scroll, match.apply { topMargin = dp(12) })
+        tabsWrap.addView(scroll, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(tabsWrap, match.apply { topMargin = dp(8) })
+
+        // 常用目录(仅浏览模式根目录显示)
+        quickRow = HorizontalScrollView(act).apply {
+            isHorizontalScrollBarEnabled = false
+            visibility = View.GONE
+        }
+        quickWrap = LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, dp(14), 0)
+        }
+        quickRow.addView(quickWrap)
+        root.addView(quickRow, match.apply { topMargin = dp(2) })
 
         // 搜索
         searchEdit = EditText(act).apply {
-            hint = "搜索当前列表…"
-            textSize = 13f
+            hint = "搜索"
+            textSize = 12f
             setSingleLine()
             setTextColor(Ui.TEXT)
             setHintTextColor(Ui.TEXT_3)
-            background = Ui.card(act, Ui.SURFACE, 12)
-            setPadding(dp(12), dp(9), dp(12), dp(9))
+            background = Ui.card(act, Ui.SURFACE, 10)
+            setPadding(dp(12), dp(7), dp(12), dp(7))
         }
         searchEdit.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun afterTextChanged(s: android.text.Editable?) = applyFilter()
         })
-        root.addView(searchEdit, match.apply { topMargin = dp(10) })
+        root.addView(searchEdit, match.apply { topMargin = dp(8) })
 
         // 推送进度条
         pushRow = LinearLayout(act).apply {
@@ -182,10 +218,10 @@ class FilesPage(private val act: Activity) {
         root.addView(pushRow, match)
 
         // 空态
-        emptyText = Ui.text(act, "", 13, Ui.TEXT_3).apply {
+        emptyText = Ui.text(act, "", 12, Ui.TEXT_3).apply {
             gravity = Gravity.CENTER
             visibility = View.GONE
-            setPadding(0, dp(48), 0, 0)
+            setPadding(0, dp(32), 0, 0)
         }
         root.addView(emptyText, match)
 
@@ -203,17 +239,17 @@ class FilesPage(private val act: Activity) {
         }
         listView.setOnItemClickListener { _, _, pos, _ -> onRowClick(filtered[pos]) }
         root.addView(listView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
-            topMargin = dp(6)
+            topMargin = dp(2)
         })
 
         // 底部多选操作栏
         val bottomWrap = LinearLayout(act).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Ui.SURFACE_HIGH)
-            setPadding(dp(14), dp(10), dp(14), dp(14))
+            setPadding(dp(12), dp(8), dp(12), dp(10))
             visibility = View.GONE
         }
-        selectText = Ui.text(act, "已选 0 项", 12, Ui.TEXT_2, Ui.TITLE)
+        selectText = Ui.text(act, "已选 0 项", 11, Ui.TEXT_2, Ui.TITLE)
         bottomWrap.addView(selectText, match)
         val actions = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         shareBtn = Ui.primaryButton(act, "分享")
@@ -235,12 +271,19 @@ class FilesPage(private val act: Activity) {
         screen.addView(bottomWrap, match)
         bottomBar = bottomWrap
         markTab(tab)
+        rebuildQuickDirs()
         return screen
     }
 
     /** 壳容器切到本页时刷新数据。 */
     fun onResume() {
         if (tab == "浏览") refreshStorage()
+        load()
+    }
+
+    /** 互传收到文件:刷存储条 + 重载当前列表(最近/图片/浏览…)。 */
+    fun onMtaReceived() {
+        runCatching { refreshStorage() }
         load()
     }
 
@@ -265,17 +308,137 @@ class FilesPage(private val act: Activity) {
 
     // ── 数据加载 ────────────────────────────────────────────────────
 
+    /** 一个分类标签:文字 + 选中下划线;顺手登记到 tabButtons/tabMarks。 */
+    private fun buildTab(label: String): LinearLayout {
+        val col = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        val b = Button(act).apply {
+            text = label
+            textSize = 13f
+            isSingleLine = true
+            isAllCaps = false
+            gravity = Gravity.CENTER
+            stateListAnimator = null
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setPadding(dp(2), dp(7), dp(2), dp(6))
+            setTextColor(Ui.TEXT_2)
+            background = Ui.ripple(act, Ui.card(act, Color.TRANSPARENT, 10, strokeWidth = 0))
+        }
+        b.setOnClickListener { switchTab(label) }
+        tabButtons.add(b)
+        col.addView(
+            b,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+        val mark = View(act).apply {
+            background = Ui.pill(act, Ui.ACCENT)
+            visibility = View.INVISIBLE
+        }
+        tabMarks.add(mark)
+        col.addView(mark, LinearLayout.LayoutParams(dp(14), dp(2)).apply { topMargin = dp(2) })
+        return col
+    }
+
+    /**
+     * 常用目录:微信/QQ 的接收目录、下载、截图等。
+     * 只列本机真实存在的(微信 QQ 目录依版本差异很大,不存在就不显示,免得点了是空页)。
+     */
+    private val quickDirs: List<Pair<String, String>> by lazy {
+        val r = FileStore.ROOT
+        listOfNotNull(
+            // 微信/QQ 的接收目录优先找可读路径;都读不到但 App 装着,也给出入口
+            // (Android 11+ 的 Android/data 有些 ROM 即使有「所有文件访问」也不放行)
+            (firstDir(
+                r + "/Android/data/com.tencent.mm/MicroMsg/Download",
+                r + "/tencent/MicroMsg/Download",
+                r + "/Download/Weixin",
+            ) ?: if (appInstalled("com.tencent.mm")) r + "/Android/data/com.tencent.mm/MicroMsg/Download" else null)
+                ?.let { "微信" to it },
+            (firstDir(
+                r + "/Android/data/com.tencent.mobileqq/Tencent/QQfile_recv",
+                r + "/tencent/QQfile_recv",
+                r + "/Download/QQ",
+            ) ?: if (appInstalled("com.tencent.mobileqq")) r + "/Android/data/com.tencent.mobileqq/Tencent/QQfile_recv" else null)
+                ?.let { "QQ" to it },
+            firstDir(r + "/Download")?.let { "下载" to it },
+            firstDir(r + "/Pictures/Screenshots", r + "/DCIM/Screenshots")?.let { "截图" to it },
+            firstDir(r + "/DCIM/Camera")?.let { "相册" to it },
+            firstDir(r + "/Pictures/Weixin", r + "/Download/Weixin")?.let { "微信图片" to it },
+            firstDir(r + "/Android/data/com.tencent.mobileqq/Tencent/QQ_Images", r + "/Pictures/QQ")
+                ?.let { "QQ图片" to it },
+            firstDir(r + "/Bluetooth")?.let { "蓝牙" to it },
+            firstDir(r + "/Documents")?.let { "文档" to it },
+        )
+    }
+
+    /** 取第一个真实存在的目录(各家/各版本的路径不一样)。 */
+    private fun firstDir(vararg paths: String): String? =
+        paths.firstOrNull { runCatching { java.io.File(it).isDirectory }.getOrDefault(false) }
+
+    private fun appInstalled(pkg: String): Boolean = runCatching {
+        act.packageManager.getPackageInfo(pkg, 0)
+        true
+    }.getOrDefault(false)
+
+    /** 重建快捷目录并在非根目录/非浏览时隐藏。 */
+    private fun rebuildQuickDirs() {
+        if (!::quickWrap.isInitialized) return
+        quickWrap.removeAllViews()
+        for ((label, path) in quickDirs) {
+            val b = Button(act).apply {
+                text = label
+                textSize = 12f
+                isSingleLine = true
+                isAllCaps = false
+                stateListAnimator = null
+                minWidth = 0
+                minimumWidth = 0
+                minHeight = 0
+                minimumHeight = 0
+                setPadding(dp(12), dp(6), dp(12), dp(6))
+                setTextColor(Ui.TEXT_2)
+                background = Ui.ripple(act, Ui.card(act, Ui.SURFACE, 999, Ui.STROKE, 1))
+                setOnClickListener { openDir(path) }
+            }
+            quickWrap.addView(
+                b,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    .apply { marginEnd = dp(8) },
+            )
+        }
+        val show = tab == "浏览" && browsePath == ROOT && quickWrap.childCount > 0
+        quickRow.visibility = if (show) View.VISIBLE else View.GONE
+    }
+
+    /** 进入某个目录(快捷目录与列表点击共用)。 */
+    private fun openDir(path: String) {
+        if (!runCatching { java.io.File(path).isDirectory }.getOrDefault(false)) {
+            android.widget.Toast.makeText(
+                act,
+                "打不开这个目录。若里面是微信/QQ 的文件,请在首页授予「所有文件访问」",
+                android.widget.Toast.LENGTH_SHORT,
+            ).show()
+            return
+        }
+        browsePath = path
+        refreshStorage()
+        load()
+        applyFilter()
+        rebuildQuickDirs()
+    }
+
     private fun markTab(t: String) {
         tab = t
-        for (b in tabButtons) {
+        for ((i, b) in tabButtons.withIndex()) {
             val on = b.text == t
-            b.setTextColor(if (on) Color.parseColor("#0A2B29") else Ui.TEXT_2)
-            b.background = if (on) {
-                Ui.ripple(act, Ui.pill(act, Ui.ACCENT))
-            } else {
-                Ui.ripple(act, Ui.card(act, Ui.SURFACE, 999, Ui.STROKE, 1))
-            }
+            b.setTextColor(if (on) Ui.TEXT else Ui.TEXT_2)
             b.setTypeface(null, if (on) Typeface.BOLD else Typeface.NORMAL)
+            tabMarks.getOrNull(i)?.visibility = if (on) View.VISIBLE else View.INVISIBLE
         }
     }
 
@@ -298,6 +461,7 @@ class FilesPage(private val act: Activity) {
         }
         updatePasteVisibility()
         load()
+        rebuildQuickDirs()
     }
 
     private fun refreshStorage() {
@@ -307,7 +471,10 @@ class FilesPage(private val act: Activity) {
             val free = stat.availableBytes
             val used = total - free
             storageBar.progress = if (total <= 0) 0 else ((used * 100) / total).toInt()
-            storageText.text = FileStore.storageText()
+            storageText.text = "已用 %.1f GB · 可用 %.1f GB".format(
+                used / 1073741824.0,
+                free / 1073741824.0,
+            )
         } catch (_: Exception) {
             storageText.text = ""
         }
@@ -346,7 +513,8 @@ class FilesPage(private val act: Activity) {
         filtered = FileStore.sorted(base, sortBy, sortAsc)
         val sortTag = if (q.isEmpty()) "" else " · ${filtered.size} 项"
         titleText.text = when (tab) {
-            "浏览" -> "内部存储" + if (browsePath == ROOT) "" else browsePath.removePrefix(ROOT)
+            // 深层路径只显示相对部分,否则标题会被从头截断成「...存储/Download/Weixin」
+            "浏览" -> if (browsePath == ROOT) "内部存储" else browsePath.removePrefix(ROOT).trimStart('/')
             else -> tab + sortTag
         }
         val empty = filtered.isEmpty()
@@ -362,22 +530,91 @@ class FilesPage(private val act: Activity) {
 
     // ── 排序 / 粘贴 ─────────────────────────────────────────────────
 
+    /** 排序:应用内深色底部卡片(不用系统 AlertDialog,和确认面板同一套语言)。 */
     private fun showSortMenu() {
-        val options = listOf("名称 ↑", "名称 ↓", "时间 ↑", "时间 ↓", "大小 ↑", "大小 ↓")
-        AlertDialog.Builder(act)
-            .setTitle("排序(目录恒在前)")
-            .setItems(options.toTypedArray()) { _, w ->
-                when (w) {
-                    0 -> { sortBy = FileStore.SortBy.NAME; sortAsc = true }
-                    1 -> { sortBy = FileStore.SortBy.NAME; sortAsc = false }
-                    2 -> { sortBy = FileStore.SortBy.TIME; sortAsc = true }
-                    3 -> { sortBy = FileStore.SortBy.TIME; sortAsc = false }
-                    4 -> { sortBy = FileStore.SortBy.SIZE; sortAsc = true }
-                    5 -> { sortBy = FileStore.SortBy.SIZE; sortAsc = false }
-                }
-                applyFilter()
+        if (sheetOverlay != null) dismissSheet()
+        val content = act.findViewById<ViewGroup>(android.R.id.content)
+        val match = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+
+        val scrim = View(act).apply { setBackgroundColor(0x99000000.toInt()); alpha = 0f }
+        scrim.setOnClickListener { dismissSheet() }
+
+        val panel = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            background = topRoundedPanel()
+            setPadding(dp(14), dp(10), dp(14), dp(16))
+        }
+        panel.addView(
+            View(act).apply { background = Ui.pill(act, Ui.TEXT_3) },
+            LinearLayout.LayoutParams(dp(32), dp(4)).apply { gravity = Gravity.CENTER_HORIZONTAL },
+        )
+        val head = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        head.addView(Ui.text(act, "排序", 15, Ui.TEXT, Ui.TITLE), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        head.addView(Ui.text(act, "目录恒在前", 11, Ui.TEXT_3))
+        panel.addView(head, match.apply { topMargin = dp(14); bottomMargin = dp(4) })
+
+        val fields = listOf(
+            "名称" to FileStore.SortBy.NAME,
+            "时间" to FileStore.SortBy.TIME,
+            "大小" to FileStore.SortBy.SIZE,
+        )
+        for ((label, by) in fields) {
+            val row = LinearLayout(act).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(2), dp(5), dp(2), dp(5))
             }
-            .show()
+            row.addView(Ui.text(act, label, 14, Ui.TEXT), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            val asc = sortChip("↑", sortBy == by && sortAsc)
+            val desc = sortChip("↓", sortBy == by && !sortAsc)
+            asc.setOnClickListener { sortBy = by; sortAsc = true; applyFilter(); dismissSheet() }
+            desc.setOnClickListener { sortBy = by; sortAsc = false; applyFilter(); dismissSheet() }
+            row.addView(asc, LinearLayout.LayoutParams(dp(48), dp(32)).apply { marginStart = dp(6) })
+            row.addView(desc, LinearLayout.LayoutParams(dp(48), dp(32)).apply { marginStart = dp(6) })
+            panel.addView(row, match)
+        }
+
+        val overlay = FrameLayout(act)
+        overlay.addView(scrim, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        overlay.addView(
+            panel,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM),
+        )
+        content.addView(overlay, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        sheetOverlay = overlay
+        overlay.isFocusableInTouchMode = true
+        overlay.requestFocus()
+        overlay.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_BACK && event.action == android.view.KeyEvent.ACTION_UP) {
+                dismissSheet(); true
+            } else {
+                false
+            }
+        }
+        panel.post {
+            panel.translationY = panel.height.toFloat()
+            panel.animate().translationY(0f).setDuration(220)
+                .setInterpolator(android.view.animation.DecelerateInterpolator()).start()
+        }
+        scrim.animate().alpha(1f).setDuration(180).start()
+    }
+
+    /** 排序方向小胶囊:选中态青色实心。 */
+    private fun sortChip(label: String, on: Boolean): Button = Button(act).apply {
+        text = label
+        textSize = 14f
+        isAllCaps = false
+        stateListAnimator = null
+        minWidth = 0
+        minimumWidth = 0
+        minHeight = 0
+        minimumHeight = 0
+        setPadding(0, 0, 0, 0)
+        setTextColor(if (on) Color.parseColor("#0A2B29") else Ui.TEXT_2)
+        background = Ui.ripple(
+            act,
+            if (on) Ui.pill(act, Ui.ACCENT) else Ui.card(act, Ui.SURFACE_HIGH, 999, Ui.STROKE, 1),
+        )
     }
 
     private fun updatePasteVisibility() {
@@ -445,10 +682,7 @@ class FilesPage(private val act: Activity) {
             return
         }
         if (item.dir && tab == "浏览") {
-            browsePath = item.path
-            refreshStorage()
-            load()
-            applyFilter()
+            openDir(item.path)
             return
         }
         // 单击文件/分类页条目 → 底部滑出分享面板
@@ -569,7 +803,7 @@ class FilesPage(private val act: Activity) {
         headCol.addView(
             Ui.text(
                 act,
-                if (items.size == 1) "${first.sizeText} · ${first.timeText}" else "共 ${items.sumOf { it.size } / 1024} KB",
+                if (items.size == 1) first.sizeText else FileStore.sizeTextOf(items.sumOf { it.size }),
                 12,
                 Ui.TEXT_3,
             ),
@@ -663,7 +897,7 @@ class FilesPage(private val act: Activity) {
         row.addView(tile, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(12) })
         val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
         col.addView(Ui.text(act, title, 14, if (onClick != null) Ui.TEXT else Ui.TEXT_3))
-        col.addView(Ui.text(act, sub, 11, Ui.TEXT_3))
+        if (sub.isNotEmpty()) col.addView(Ui.text(act, sub, 11, Ui.TEXT_3))
         row.addView(col, LinearLayout.LayoutParams(0, ViewGroupHelpers.wrap(), 1f).apply { marginStart = dp(4) })
         row.addView(Ui.text(act, "›", 14, Ui.TEXT_3))
         return row
@@ -681,10 +915,10 @@ class FilesPage(private val act: Activity) {
         // 1. 发送到电脑
         val pcSlot = sheetSection(body, "发送到电脑")
         if (conns.isEmpty()) {
-            pcSlot.addView(Ui.text(act, "未连接电脑——请在首页配对并连接", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) })
+            pcSlot.addView(Ui.text(act, "未连接 · 去首页配对", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) })
         } else {
             for (fp in conns) {
-                val row = sheetRow("💻", null, svc?.pinnedName(fp) ?: fp, "在线 · 点击发送") {
+                val row = sheetRow("💻", null, svc?.pinnedName(fp) ?: fp, "在线") {
                     exitSelection()
                     startPush(items, fp)
                     dismissSheet()
@@ -695,8 +929,8 @@ class FilesPage(private val act: Activity) {
 
         // 2. 发送到手机(APartner)
         val phoneSlot = sheetSection(body, "发送到手机(APartner)")
-        val phoneLoading = Ui.text(act, "正在获取…", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) }
-        phoneSlot.addView(phoneLoading)
+        val phoneLoading = Ui.text(act, "读取中…", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) }
+        if (svc?.firstDesktopConn() != null) phoneSlot.addView(phoneLoading)
         val conn = svc?.firstDesktopConn()
         if (conn != null) {
             Thread {
@@ -710,13 +944,13 @@ class FilesPage(private val act: Activity) {
                     phoneSlot.removeAllViews()
                     if (phones.isEmpty()) {
                         phoneSlot.addView(
-                            Ui.text(act, "附近没有其他安装了 APartner 的手机", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) },
+                            Ui.text(act, "附近没有其他手机", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) },
                         )
                         return@runOnUiThread
                     }
                     for (p in phones) {
                         phoneSlot.addView(
-                            sheetRow("📱", null, p.name, "在线 · 经电脑中继接收") {
+                            sheetRow("📱", null, p.name, "在线 · 经电脑中继") {
                                 exitSelection()
                                 startRelay(items, p)
                                 dismissSheet()
@@ -726,12 +960,12 @@ class FilesPage(private val act: Activity) {
                 }
             }.start()
         } else {
-            phoneSlot.addView(Ui.text(act, "电脑未连接,无法发现其他手机", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) })
+            phoneSlot.addView(Ui.text(act, "需先连接电脑", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) })
         }
 
         // 3. 互传联盟设备(BLE 发现,6 秒窗口)
-        val mtaSlot = sheetSection(body, "互传联盟设备")
-        val mtaLoading = Ui.text(act, "正在扫描附近开启互传的设备…", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) }
+        val mtaSlot = sheetSection(body, "互传联盟 · 点击直发")
+        val mtaLoading = Ui.text(act, "正在扫描…", 12, Ui.TEXT_3).apply { setPadding(dp(12), dp(6), dp(12), dp(6)) }
         mtaSlot.addView(mtaLoading)
         startMtaScan(mtaSlot, mtaLoading, items)
 
@@ -747,12 +981,12 @@ class FilesPage(private val act: Activity) {
         val adapter = btManager.adapter
         val scanner = adapter?.bluetoothLeScanner
         if (adapter == null || !adapter.isEnabled || scanner == null) {
-            loading.text = "蓝牙未开启,无法发现互传联盟设备"
+            loading.text = "蓝牙未开启"
             return
         }
         // BLUETOOTH_SCAN 是运行时权限:未授予时 startScan 会抛 SecurityException
         if (act.checkSelfPermission(android.Manifest.permission.BLUETOOTH_SCAN) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            loading.text = "缺少蓝牙扫描权限——请在首页权限引导中授权"
+            loading.text = "缺少蓝牙权限"
             return
         }
         mtaFound.clear()
@@ -790,23 +1024,30 @@ class FilesPage(private val act: Activity) {
                 )
                 val dataMap = record?.serviceData ?: return
                 var supports5G = true
-                var hasBrand = false
                 var id = ""
                 var name = ""
                 for ((pu, d) in dataMap) {
-                    if (d.size == 6 && pu.uuid == MtaConst.ADV_DATA_5G_BRAND_UUID) {
-                        // UUID 字节大端:[2]=支持5G [3]=品牌
-                        val buf = java.nio.ByteBuffer.allocate(16)
-                        buf.putLong(pu.uuid.mostSignificantBits)
-                        buf.putLong(pu.uuid.leastSignificantBits)
-                        supports5G = buf.array()[2].toInt() == 1
-                        hasBrand = true
-                    }
-                    if (pu.uuid == MtaConst.SCAN_RESP_UUID && d.size == 27) {
-                        id = String.format("%04x", (d[8].toInt() shl 8) or d[9].toInt())
-                        var nameBytes = d.copyOfRange(10, 26)
-                        if (nameBytes[15] == '\t'.code.toByte()) nameBytes = nameBytes.copyOfRange(0, 15)
-                        name = String(nameBytes, Charsets.UTF_8).trimEnd('\u0000')
+                    // ★ 不能按 UUID 认:各家 service-data UUID 不一样——真机(华为/小米)
+                    //   6 字节用 1B1E、27 字节用 2000;CatShare 用 01FF / FFFF。
+                    //   上游就是只按长度认(6=品牌位/5G位,27=名字+senderId),这里对齐。
+                    when (d.size) {
+                        6 -> {
+                            // 这些位在「UUID 自身」里:大端 [2]=支持5G [3]=品牌
+                            val buf = java.nio.ByteBuffer.allocate(16)
+                            buf.putLong(pu.uuid.mostSignificantBits)
+                            buf.putLong(pu.uuid.leastSignificantBits)
+                            supports5G = buf.array()[2].toInt() == 1
+                        }
+
+                        27 -> {
+                            id = String.format(
+                                "%04x",
+                                ((d[8].toInt() and 0xff) shl 8) or (d[9].toInt() and 0xff),
+                            )
+                            var nameBytes = d.copyOfRange(10, 26)
+                            if (nameBytes[15] == '\t'.code.toByte()) nameBytes = nameBytes.copyOfRange(0, 15)
+                            name = String(nameBytes, Charsets.UTF_8).trimEnd('\u0000')
+                        }
                     }
                 }
                 // 小米原生广播:name 缺省、id 在 svcData/scanResp 因厂商而异 → 兜底
@@ -815,9 +1056,10 @@ class FilesPage(private val act: Activity) {
                 }
                 // 排除自身:广播 serviceData(000001ff-…)前 2 字节 == 本机 SENDER_ID
                 // (不能按 UUID base 排除——会误杀同为该 base 形式的其他互传设备,如 HUAWEI)
-                val selfBeacon = (result.scanRecord?.serviceData?.get(
-                    android.os.ParcelUuid(MtaConst.ADV_DATA_5G_BRAND_UUID),
-                ))?.let { d -> d.size >= 2 && String.format("%04x", (d[0].toInt() shl 8) or d[1].toInt()) == MtaConst.SENDER_ID } == true
+                val selfBeacon = result.scanRecord?.serviceData?.entries?.any { (_, d) ->
+                    d.size >= 2 &&
+                        String.format("%04x", ((d[0].toInt() and 0xff) shl 8) or (d[1].toInt() and 0xff)) == MtaConst.SENDER_ID
+                } == true
                 if (selfBeacon) {
                     return@onScanResult
                 }
@@ -842,10 +1084,10 @@ class FilesPage(private val act: Activity) {
         act.runOnUiThread {
             if (mtaFound.isNotEmpty()) renderMtaRows(slot, loading, items)
         }
-        // 6 秒窗口后停止扫描并落定列表
+        // 12 秒窗口后停止扫描并落定列表(必须传 finished=true,否则提示永远停在「正在扫描」)
         act.window.decorView.postDelayed({
             stopMtaScan()
-            if (sheetOverlay != null) renderMtaRows(slot, loading, items)
+            if (sheetOverlay != null) renderMtaRows(slot, loading, items, finished = true)
         }, 12_000)
     }
 
@@ -875,7 +1117,7 @@ class FilesPage(private val act: Activity) {
         }
         for (d in mtaFound.values) {
             slot.addView(
-                sheetRow("💠", Ui.TILE_DOC, d.name, "互传联盟 · 点击直发") {
+                sheetRow("💠", Ui.TILE_DOC, d.name, "") {
                     val paths = items.map { it.path }
                     val started = MtaSenderService.start(act, d.device, d.supports5G, d.name, paths)
                     if (started) {
@@ -1201,6 +1443,7 @@ class FilesPage(private val act: Activity) {
         refreshStorage()
         load()
         applyFilter()
+        rebuildQuickDirs()
     }
 
     private fun onNewFolder() {
@@ -1247,7 +1490,7 @@ class FilesPage(private val act: Activity) {
                 val line = LinearLayout(act).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(8), dp(8), dp(8), dp(8))
+                    setPadding(dp(4), dp(7), dp(4), dp(7))
                 }
                 // 磁块:圆角裁剪容器,内含 缩略图(图片文件)或 类型 emoji(其他)
                 val tileWrap = FrameLayout(act).apply {
@@ -1274,10 +1517,10 @@ class FilesPage(private val act: Activity) {
                     tileText,
                     FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
                 )
-                line.addView(tileWrap, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) })
+                line.addView(tileWrap, LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(10) })
                 val col = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
                 val name = TextView(act).apply {
-                    textSize = 15f
+                    textSize = 14f
                     setTextColor(Ui.TEXT)
                     maxLines = 1
                     ellipsize = android.text.TextUtils.TruncateAt.START
@@ -1286,13 +1529,8 @@ class FilesPage(private val act: Activity) {
                 col.addView(name, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                 col.addView(meta, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                 line.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                val check = TextView(act).apply {
-                    textSize = 15f
-                    gravity = Gravity.CENTER
-                    visibility = View.GONE
-                }
-                check.background = Ui.card(act, Ui.SURFACE_HIGH, 999, Ui.STROKE, 1)
-                line.addView(check, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginStart = dp(8) })
+                val check = CheckView(act).apply { visibility = View.GONE }
+                line.addView(check, LinearLayout.LayoutParams(dp(22), dp(22)).apply { marginStart = dp(8) })
                 view = line
                 holder = RowHolder(tileWrap, tileImg, tileText, name, meta, check, line)
                 view.tag = holder
@@ -1331,13 +1569,7 @@ class FilesPage(private val act: Activity) {
             }
             val checked = item.path in selected
             holder.check.visibility = if (selectionMode) View.VISIBLE else View.GONE
-            holder.check.text = if (checked) "✓" else ""
-            holder.check.background = if (checked) {
-                Ui.card(act, Ui.ACCENT, 999, strokeWidth = 0)
-            } else {
-                Ui.card(act, Ui.SURFACE_HIGH, 999, Ui.STROKE, 1)
-            }
-            holder.check.setTextColor(Color.parseColor("#0A2B29"))
+            holder.check.isChecked = checked
             holder.row.setBackgroundColor(if (checked) Color.parseColor("#182031") else Color.TRANSPARENT)
             return view
         }
@@ -1349,7 +1581,7 @@ class FilesPage(private val act: Activity) {
         val tileText: TextView,
         val name: TextView,
         val meta: TextView,
-        val check: TextView,
+        val check: CheckView,
         val row: LinearLayout,
     ) {
         var boundPath: String? = null
