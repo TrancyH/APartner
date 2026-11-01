@@ -8,6 +8,7 @@
     <!-- connectedDevice FGS 类型的运行时准入要求(任一即可,均为 normal 权限) -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -55,6 +56,22 @@
             </intent-filter>
         </activity>
 
+        <!-- MTA 互传联盟:发送 / 接收 -->
+        <service
+            android:name=".mta.MtaSenderService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <service
+            android:name=".mta.MtaReceiverService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- 第三方应用分享文件通道(零依赖 FileProvider 替代) -->
+        <provider
+            android:name=".ShareFileProvider"
+            android:authorities="com.amoolink.companion.sharefiles"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
         <service
             android:name=".ConnectionService"

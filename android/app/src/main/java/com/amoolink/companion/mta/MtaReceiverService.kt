@@ -187,7 +187,7 @@ class MtaReceiverService : Service() {
 
     private fun startAdvertising() {
         try {
-            val idBytes = MtaConst.SENDER_ID.chunked(2).map { it.toInt(16).toByte() }
+            val idBytes = MtaConst.SENDER_ID.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
             val advData = AdvertiseData.Builder().apply {
                 addServiceUuid(android.os.ParcelUuid(MtaConst.ADV_SERVICE_UUID))
                 addServiceData(
@@ -481,15 +481,35 @@ class MtaReceiverService : Service() {
             val totalSize = payload.optLong("totalSize", 0)
             val fileCount = payload.optInt("fileCount", 1)
 
-            // 用户确认(通知按钮,10s 超时=拒绝)
+            // 用户确认:前台=应用内确认面板(20s),后台=通知(10s);超时=拒绝
             MtaLinkBus.userAccept = null
-            nm.notify(ASK_ID, askNotification(taskIdStr.toIntOrNull() ?: 0, senderName, fileName, fileCount, totalSize))
-            val answer = withTimeoutOrNull(10_000) {
-                while (MtaLinkBus.userAccept == null) delay(150)
-                MtaLinkBus.userAccept
+            val usePanel = MtaState.appInForeground && MtaUiBridge.panelEmitter != null
+            var answer: Boolean? = null
+            if (usePanel) {
+                val accepted = CompletableDeferred<Boolean>()
+                val emitted = MtaUiBridge.emit(
+                    MtaUiBridge.IncomingRequest(senderName, fileName, fileCount, totalSize) { accept ->
+                        accepted.complete(accept)
+                    },
+                )
+                if (emitted) {
+                    answer = withTimeoutOrNull(20_000) { accepted.await() }
+                } else {
+                    nm.notify(ASK_ID, askNotification(taskIdStr.toIntOrNull() ?: 0, senderName, fileName, fileCount, totalSize))
+                    answer = withTimeoutOrNull(10_000) {
+                        while (MtaLinkBus.userAccept == null) delay(150)
+                        MtaLinkBus.userAccept
+                    }
+                }
+            } else {
+                nm.notify(ASK_ID, askNotification(taskIdStr.toIntOrNull() ?: 0, senderName, fileName, fileCount, totalSize))
+                answer = withTimeoutOrNull(10_000) {
+                    while (MtaLinkBus.userAccept == null) delay(150)
+                    MtaLinkBus.userAccept
+                }
             }
+            nm.cancel(ASK_ID)
             if (answer != true) {
-                nm.cancel(ASK_ID)
                 ws.send(Frame.Text(MtaWsMessage.status(taskIdStr.toIntOrNull() ?: 0, 3, "user refuse").toText()))
                 throw RuntimeException("用户拒绝接收")
             }

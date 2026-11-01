@@ -11,6 +11,7 @@ import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.Typeface
 import android.text.TextWatcher
+import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
@@ -749,6 +750,11 @@ class FilesPage(private val act: Activity) {
             loading.text = "蓝牙未开启,无法发现互传联盟设备"
             return
         }
+        // BLUETOOTH_SCAN 是运行时权限:未授予时 startScan 会抛 SecurityException
+        if (act.checkSelfPermission(android.Manifest.permission.BLUETOOTH_SCAN) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            loading.text = "缺少蓝牙扫描权限——请在首页权限引导中授权"
+            return
+        }
         mtaFound.clear()
         val filter = android.bluetooth.le.ScanFilter.Builder()
             .setServiceUuid(android.os.ParcelUuid(MtaConst.ADV_SERVICE_UUID))
@@ -781,6 +787,7 @@ class FilesPage(private val act: Activity) {
                     }
                 }
                 if (id.isEmpty() || name.isEmpty()) return
+                Log.i("MtaScan", "discovered id=$id name=$name 5g=$supports5G rssi=${result.rssi}")
                 mtaFound[id] = MtaFound(result.device, id, name, supports5G)
                 renderMtaRows(slot, loading, items)
             }
@@ -790,7 +797,13 @@ class FilesPage(private val act: Activity) {
             }
         }
         mtaScanCallback = callback
-        scanner.startScan(listOf(filter), settings, callback)
+        try {
+            scanner.startScan(listOf(filter), settings, callback)
+        } catch (e: SecurityException) {
+            mtaScanCallback = null
+            loading.text = "蓝牙扫描被拒绝——请授权 BLUETOOTH_SCAN"
+            return
+        }
         act.runOnUiThread {
             if (mtaFound.isNotEmpty()) renderMtaRows(slot, loading, items)
         }
@@ -798,7 +811,7 @@ class FilesPage(private val act: Activity) {
         act.window.decorView.postDelayed({
             stopMtaScan()
             if (sheetOverlay != null) renderMtaRows(slot, loading, items)
-        }, 6_000)
+        }, 12_000)
     }
 
     @android.annotation.SuppressLint("MissingPermission")
@@ -814,11 +827,15 @@ class FilesPage(private val act: Activity) {
         mtaScanCallback = null
     }
 
-    private fun renderMtaRows(slot: LinearLayout, loading: TextView, items: List<FileStore.Item>) {
+    private fun renderMtaRows(slot: LinearLayout, loading: TextView, items: List<FileStore.Item>, finished: Boolean = false) {
         if (sheetOverlay == null) return
         slot.removeAllViews()
         if (mtaFound.isEmpty()) {
-            slot.addView(loading)
+            slot.addView(
+                if (finished) Ui.text(act, "未发现互传联盟设备(对方需开启互传且与本机同网段蓝牙范围)", 12, Ui.TEXT_3)
+                    .apply { setPadding(dp(12), dp(6), dp(12), dp(6)) }
+                else loading,
+            )
             return
         }
         for (d in mtaFound.values) {

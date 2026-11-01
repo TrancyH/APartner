@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import com.amoolink.companion.mta.MtaReceiverService
+import com.amoolink.companion.mta.MtaUiBridge
 import com.amoolink.companion.mta.MtaState
 import android.content.Context
 import android.content.Intent
@@ -77,6 +78,10 @@ class MainActivity : Activity() {
         window.statusBarColor = Ui.BG
         window.navigationBarColor = Ui.BG
         buildUi()
+        // MTA 传输请求 → 应用内确认面板(前台时;后台回落通知)
+        MtaUiBridge.panelEmitter = { req: MtaUiBridge.IncomingRequest ->
+            showIncomingPanel(req)
+        }
         // 开机自启默认开(引导页语义;关闭存 prefs)
         getSharedPreferences(ConnectionService.PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean("autostart", true).apply()
@@ -159,6 +164,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        MtaState.appInForeground = true
         handler.post(refresh)
         if (currentTab == "files") filesPage.onResume()
         // 焦点在手:推送当前剪贴板到已连接桌面(M5-6 手机→电脑方向)
@@ -176,6 +182,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
+        MtaState.appInForeground = false
         handler.removeCallbacks(refresh)
     }
 
@@ -623,5 +630,100 @@ class MainActivity : Activity() {
 
     private fun toast(msg: String) {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    }
+
+    // ── MTA 传输请求:应用内底部确认面板 ───────────────────────────
+
+    private var incomingOverlay: FrameLayout? = null
+
+    private fun showIncomingPanel(req: MtaUiBridge.IncomingRequest) {
+        incomingOverlay?.let { (it.parent as? ViewGroup)?.removeView(it) }
+        val content = findViewById<ViewGroup>(android.R.id.content)
+
+        val scrim = View(this).apply { setBackgroundColor(0x99000000.toInt()); alpha = 0f }
+        scrim.setOnClickListener { answerIncoming(false) }
+
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                val r = dp(22).toFloat()
+                cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+                setColor(Ui.SURFACE)
+            }
+            setPadding(dp(20), dp(14), dp(20), dp(20))
+        }
+        panel.addView(
+            View(this).apply { background = Ui.pill(this@MainActivity, Ui.TEXT_3) },
+            LinearLayout.LayoutParams(dp(36), dp(4)).apply { gravity = Gravity.CENTER_HORIZONTAL },
+        )
+        panel.addView(
+            Ui.text(this, "收到互传请求", 18, Ui.TEXT, Ui.TITLE).apply {
+                setPadding(0, dp(14), 0, dp(4))
+            },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+        panel.addView(
+            Ui.text(this, "${req.senderName} 要发送 ${req.fileCount} 个文件给你", 13, Ui.TEXT_2),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+        val fileCard = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = Ui.card(this@MainActivity, Ui.SURFACE_HIGH, 12)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        fileCard.addView(
+            Ui.text(this, "📄", 20, Ui.TEXT).apply { gravity = Gravity.CENTER },
+            LinearLayout.LayoutParams(dp(34), dp(34)),
+        )
+        val fcol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fcol.addView(Ui.text(this, req.fileName, 14, Ui.TEXT))
+        fcol.addView(Ui.text(this, "${req.fileCount} 个文件 · ${req.totalSize / 1024} KB", 11, Ui.TEXT_3))
+        fileCard.addView(fcol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(8) })
+        panel.addView(
+            fileCard,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) },
+        )
+
+        val btns = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(14), 0, 0)
+        }
+        val reject = Ui.ghostButton(this, "拒绝", danger = true)
+        val accept = Ui.primaryButton(this, "接受")
+        reject.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) }
+        accept.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        reject.setOnClickListener { answerIncoming(false) }
+        accept.setOnClickListener { answerIncoming(true) }
+        btns.addView(reject)
+        btns.addView(accept)
+        panel.addView(btns, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        val overlay = FrameLayout(this)
+        overlay.addView(scrim, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        overlay.addView(
+            panel,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM),
+        )
+        content.addView(overlay, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        incomingOverlay = overlay
+
+        panel.post {
+            panel.translationY = panel.height.toFloat()
+            panel.animate().translationY(0f).setDuration(240)
+                .setInterpolator(android.view.animation.DecelerateInterpolator()).start()
+        }
+        scrim.animate().alpha(1f).setDuration(180).start()
+    }
+
+    private fun answerIncoming(accept: Boolean) {
+        val overlay = incomingOverlay ?: return
+        incomingOverlay = null
+        val panel = overlay.getChildAt(1)
+        panel.animate().translationY(panel.height.toFloat()).setDuration(200)
+            .withEndAction { (overlay.parent as? ViewGroup)?.removeView(overlay) }.start()
+        overlay.getChildAt(0).animate().alpha(0f).setDuration(200).start()
+        MtaReceiverService.MtaLinkBus.userAccept = accept
     }
 }

@@ -9,6 +9,10 @@ import android.content.SharedPreferences
 object MtaState {
     const val PREFS = "mta_state"
 
+    /** APartner 是否在前台(MaintenanceActivity onResume/onPause 维护)。 */
+    @Volatile
+    var appInForeground: Boolean = false
+
     @Volatile
     var busy: Boolean = false
         private set
